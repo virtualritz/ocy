@@ -1,6 +1,6 @@
 [package]
 name = "ocy"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Alexandre Delattre <alexandre.delattre.biz@gmail.com>"]
 edition = "2024"
 description = "ocy is a simple project cleaner CLI"
