@@ -124,7 +124,7 @@ impl OcyOptions {
         match self.start_dir.len() {
             0 => Ok(None),
             1 => Ok(Some(&self.start_dir[0])),
-            _ => eyre::bail!("Only one start directory can be specified"),
+            _ => Err(eyre::eyre!("Only one start directory can be specified")),
         }
     }
 
