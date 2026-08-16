@@ -92,7 +92,43 @@ rather than per project:
 | Cargo registry | `$CARGO_HOME`, or `~/.cargo`, `/registry` | cache, src              |
 | Cargo git      | `$CARGO_HOME`, or `~/.cargo`, `/git`      | checkouts, db           |
 | Gradle cache   | `$GRADLE_USER_HOME`, or `~/.gradle`       | caches, daemon          |
-| Tool cache     | `$XDG_CACHE_HOME`, or `~/.cache`          | sccache, ccache, miri, trunk, .wasm-pack, node-gyp, pnpm, yarn, puppeteer, pip, uv, go-build |
+| Tool cache     | `$XDG_CACHE_HOME`, or `~/.cache` (and `~/Library/Caches` on macOS) | sccache, Mozilla.sccache, ccache, miri, trunk, .wasm-pack, node-gyp, pnpm, yarn, puppeteer, deno, pip, uv, go-build |
+| Tool cache     | `~`                                       | .ccache, .npm/_cacache, .local/share/pnpm/store, .bun/install/cache, .m2/repository, .ivy2/cache |
+
+Each entry names the cache itself, not the directory holding it: `~/.npm` also
+holds logs, and `~/.local/share/pnpm` also holds the binaries pnpm installed.
+
+Names are listed across platforms rather than chosen per platform. An anchored
+rule fires on an exact path, so an entry that does not exist — `Mozilla.sccache`
+anywhere but macOS — simply never matches.
+
+Go's *module* cache is deliberately absent: Go makes those directories
+read-only, so removing one fails rather than reclaiming anything. That is what
+`go clean -modcache` is for.
+
+### Caches the environment has moved
+
+A cache a tool has been pointed somewhere else is found too, via the variable
+that moved it:
+
+| Variable | Reclaims |
+|---|---|
+| `SCCACHE_DIR`, `CCACHE_DIR`, `UV_CACHE_DIR`, `GOCACHE`, `DENO_DIR` | that directory |
+| `npm_config_cache` | `_cacache` inside it |
+| `XDG_DATA_HOME` | `pnpm/store` inside it |
+
+The default location stays covered either way — a cache left behind at the old
+path is still a cache.
+
+Config files are not read. A tool's own variable is the one thing that reliably
+says where its cache went, and reading the files instead would mean a TOML
+parser for sccache, a second format for ccache and a third for npm, each with
+its own way of being wrong. If the location lives only in a config file, set the
+variable for the one run:
+
+```
+SCCACHE_DIR=/mnt/fast/sccache ocy --caches ~
+```
 
 Four rule shapes go beyond a plain sibling match:
 
@@ -131,7 +167,9 @@ bookkeeping straight where deleting the directory would not.
 
 An anchored rule is still only reached by walking. A cache outside the tree you
 pointed `ocy` at stays untouched, so `ocy --caches ~/code` reclaims nothing from
-`~/.cargo`.
+`~/.cargo` — and knowing that `SCCACHE_DIR` points at `/mnt/fast/sccache` does
+not help a scan of `~` either. Point `ocy` at a directory above the cache, or at
+the cache itself.
 
 ### Colour
 

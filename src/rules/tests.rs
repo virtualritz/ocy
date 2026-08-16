@@ -285,3 +285,58 @@ fn a_cache_rule_reclaims_only_the_cache_it_names() -> eyre::Result<()> {
     assert_eq!(vec![".cache/sccache"], found);
     Ok(())
 }
+
+/// A tool's own variable is the one thing that reliably says where its cache went, so a
+/// moved cache has to be reclaimed where it now lives rather than where it usually does.
+#[test]
+fn a_moved_cache_is_reclaimed_where_it_now_lives() -> eyre::Result<()> {
+    let root = tempfile::tempdir()?;
+    let moved = root.path().join("scratch/sccache");
+    fs::create_dir_all(moved.join("0"))?;
+    fs::create_dir_all(root.path().join("scratch/keep"))?;
+
+    let rule = super::moved_cache_rule(&moved).expect("a nested path yields a rule")?;
+    let found = reclaimed_at(root.path(), vec![rule])?;
+
+    assert_eq!(vec!["scratch/sccache"], found);
+    Ok(())
+}
+
+/// A variable pointing at a filesystem root names nothing a rule could reclaim, and must
+/// not be turned into one that would try.
+#[test]
+fn a_moved_cache_needs_a_parent_to_anchor_on() {
+    assert!(super::moved_cache_rule(Path::new("/")).is_none());
+}
+
+/// Every cache home in play has to be covered, or `--caches` finds nothing on a platform
+/// whose tools do not use the one we guessed.
+#[test]
+fn a_rule_is_anchored_at_every_cache_home() -> eyre::Result<()> {
+    let home = super::home_directory().expect("tests run with a home directory");
+    let rules = standard_rules(false, true)?;
+
+    for cache_home in super::cache_homes(&home) {
+        assert!(
+            rules.iter().any(|rule| rule.anchor() == Some(&*cache_home)),
+            "no rule anchored at {}",
+            cache_home.display()
+        );
+    }
+    Ok(())
+}
+
+/// Nothing under `--caches` may name a directory that also holds installed software: the
+/// cache inside it is reclaimable, the binaries beside it are not.
+#[test]
+fn no_cache_entry_names_a_directory_holding_installed_software() {
+    for entry in super::HOME_ENTRIES {
+        assert!(
+            !matches!(
+                *entry,
+                ".npm" | ".local/share/pnpm" | ".bun" | ".m2" | ".ivy2"
+            ),
+            "{entry} holds more than a cache"
+        );
+    }
+}

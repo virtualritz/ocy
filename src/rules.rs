@@ -141,14 +141,20 @@ pub fn standard_rules(allow_commands: bool, clean_caches: bool) -> Result<Vec<Ru
         .collect())
 }
 
-/// Entries under the cache home that exist only to be a cache.
+/// Entries under a cache home that exist only to be a cache.
 ///
 /// Every one of these is refetched or rebuilt on demand, so losing it costs time and
-/// nothing else. `~/.cache` also holds state that is not reproducible, which is why the
+/// nothing else. A cache home also holds state that is not reproducible, which is why the
 /// list is named out rather than inferred from the shape of what is in there.
-const TOOL_CACHES: &[&str] = &[
+///
+/// Named generously across platforms: an anchored rule fires on an exact path, so an
+/// entry that does not exist here -- `Mozilla.sccache` anywhere but macOS -- simply never
+/// matches. That is cheaper and less brittle than encoding each tool's own idea of where
+/// its cache belongs on which system.
+const CACHE_HOME_ENTRIES: &[&str] = &[
     // Compiler caches.
     "sccache",
+    "Mozilla.sccache",
     "ccache",
     "miri",
     // Rust tooling.
@@ -159,11 +165,47 @@ const TOOL_CACHES: &[&str] = &[
     "pnpm",
     "yarn",
     "puppeteer",
+    "deno",
     // Python tooling.
     "pip",
     "uv",
-    // Go tooling.
+    // Go's build cache. Its *module* cache is deliberately absent: Go makes those
+    // directories read-only, so removing one fails rather than reclaiming anything.
+    // `go clean -modcache` is what handles that.
     "go-build",
+];
+
+/// Caches a tool keeps at a fixed place under the home directory instead.
+///
+/// Each entry names the cache itself rather than the directory holding it. `~/.npm` also
+/// holds logs, and `~/.local/share/pnpm` also holds the binaries pnpm has installed --
+/// reclaiming either wholesale would take out more than a cache.
+const HOME_ENTRIES: &[&str] = &[
+    // Where ccache kept its cache before 4.0, and still does when it finds one there.
+    ".ccache",
+    ".npm/_cacache",
+    ".local/share/pnpm/store",
+    ".bun/install/cache",
+    ".m2/repository",
+    ".ivy2/cache",
+];
+
+/// Environment variables that move a cache, and what to append to reach the cache itself.
+///
+/// A tool's own variable is the one thing that reliably says where its cache went;
+/// reading its config file would mean a TOML parser for sccache, a second format for
+/// ccache and a third for npm, each with its own way of being wrong.
+///
+/// The default location stays covered either way. A cache left behind at the old path is
+/// still a cache, so these only add wherever the tool is being pointed now.
+const MOVED_CACHES: &[(&str, &str)] = &[
+    ("SCCACHE_DIR", ""),
+    ("CCACHE_DIR", ""),
+    ("UV_CACHE_DIR", ""),
+    ("GOCACHE", ""),
+    ("DENO_DIR", ""),
+    ("npm_config_cache", "_cacache"),
+    ("XDG_DATA_HOME", "pnpm/store"),
 ];
 
 /// Rules for the caches that tools keep once for the whole machine.
@@ -175,6 +217,9 @@ const TOOL_CACHES: &[&str] = &[
 ///
 /// Each location can be moved by an environment variable, and a scan that only knew the
 /// default would quietly find nothing on a machine that had moved it.
+///
+/// An anchored rule is still only reached by walking, so moving a cache outside the tree
+/// being scanned puts it out of reach whether or not its variable is set.
 fn cache_rules() -> Result<Vec<Rule>, RuleError> {
     let Some(home) = home_directory() else {
         log::warn!("cannot locate the home directory, so no shared cache is known");
@@ -183,9 +228,8 @@ fn cache_rules() -> Result<Vec<Rule>, RuleError> {
 
     let cargo = env_dir("CARGO_HOME").unwrap_or_else(|| home.join(".cargo"));
     let gradle = env_dir("GRADLE_USER_HOME").unwrap_or_else(|| home.join(".gradle"));
-    let cache = env_dir("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache"));
 
-    Ok(vec![
+    let mut rules = vec![
         // Downloaded crates and the sources unpacked from them. `index` is left alone:
         // it is small, and refetching it stalls the next build of every project at once.
         Rule::remove_at("Cargo registry", cargo.join("registry"), &["cache", "src"])?,
@@ -194,8 +238,62 @@ fn cache_rules() -> Result<Vec<Rule>, RuleError> {
         // Gradle's own `wrapper` directory is left alone: it holds the Gradle
         // distributions themselves, which is an installation rather than a cache.
         Rule::remove_at("Gradle cache", gradle, &["caches", "daemon"])?,
-        Rule::remove_at("Tool cache", cache, TOOL_CACHES)?,
-    ])
+        Rule::remove_at("Tool cache", home.clone(), HOME_ENTRIES)?,
+    ];
+
+    for cache_home in cache_homes(&home) {
+        rules.push(Rule::remove_at(
+            "Tool cache",
+            cache_home,
+            CACHE_HOME_ENTRIES,
+        )?);
+    }
+
+    for (variable, suffix) in MOVED_CACHES {
+        let Some(moved) = env_dir(variable) else {
+            continue;
+        };
+        let moved = if suffix.is_empty() {
+            moved
+        } else {
+            moved.join(suffix)
+        };
+
+        match moved_cache_rule(&moved) {
+            Some(rule) => rules.push(rule?),
+            // A variable naming a filesystem root, or a path that is not valid UTF-8,
+            // leaves nothing a rule could reclaim.
+            None => log::warn!("ignoring {variable}: {} names no cache", moved.display()),
+        }
+    }
+
+    Ok(rules)
+}
+
+/// The cache homes in use on this platform.
+///
+/// `XDG_CACHE_HOME` wins where it is set, as it does for every tool that honours it.
+/// macOS keeps its own cache directory, and tools there are split over which they use, so
+/// both are in play on the same machine.
+fn cache_homes(home: &Path) -> Vec<PathBuf> {
+    let mut homes = vec![env_dir("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache"))];
+
+    if cfg!(target_os = "macos") {
+        homes.push(home.join("Library/Caches"));
+    }
+    homes
+}
+
+/// A rule reclaiming `path` itself, anchored on the directory that holds it.
+///
+/// [`Rule::remove_at`] reclaims entries *inside* its anchor, so a cache that has been
+/// moved somewhere of its own -- with no sibling worth naming -- is expressed by
+/// anchoring one level up. Returns [`None`] for a path with no parent or no name.
+fn moved_cache_rule(path: &Path) -> Option<Result<Rule, RuleError>> {
+    let parent = path.parent()?;
+    let name = path.file_name()?.to_str()?;
+
+    Some(Rule::remove_at("Tool cache", parent.to_path_buf(), &[name]))
 }
 
 /// A directory named by an environment variable, treating an empty setting as unset.
