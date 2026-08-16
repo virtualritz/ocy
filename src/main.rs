@@ -14,7 +14,7 @@ use ocy_core::rule::Rule;
 use ocy_core::rule::widest_name;
 use ocy_core::walker::{WalkOptions, Walker};
 use ocy_core::{cleaner::Cleaner, models::RemovalCandidate};
-use rules::{SCANNED_HIDDEN_DIRS, rule_names, standard_rules};
+use rules::{rule_names, scanned_hidden, standard_rules};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -54,10 +54,7 @@ fn run(options: &OcyOptions) -> Result<ExitCode> {
     let walk_options = WalkOptions {
         ignores: options.ignores_set()?,
         walk_all: options.walk_all,
-        scanned_hidden: SCANNED_HIDDEN_DIRS
-            .iter()
-            .map(|d| (*d).to_string())
-            .collect(),
+        scanned_hidden: scanned_hidden(&rules),
         max_depth: options.max_depth,
         one_file_system: options.one_file_system,
     };
@@ -95,7 +92,7 @@ fn run(options: &OcyOptions) -> Result<ExitCode> {
 }
 
 fn rules_for_options(options: &OcyOptions) -> Result<Vec<Rule>> {
-    let all_rules = standard_rules(options.allow_commands)?;
+    let all_rules = standard_rules(options.allow_commands, options.clean_caches)?;
     let all_rule_names = rule_names(&all_rules);
 
     let selected_rules = options.selected_rules();
@@ -165,7 +162,7 @@ fn print_banner() {
 }
 
 fn print_rules() -> Result<()> {
-    let rules = rule_names(&standard_rules(true)?);
+    let rules = rule_names(&standard_rules(true, true)?);
     let mut rules: Vec<Arc<str>> = rules.into_iter().collect();
     rules.sort();
 

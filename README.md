@@ -58,16 +58,18 @@ markers must be present, so a rule only fires on real evidence of a project.
 | Rule name    | Markers                   | Reclaims                                                                  |
 |--------------|---------------------------|---------------------------------------------------------------------------|
 | Cargo        | Cargo.toml                | target                                                                    |
+| Cargo        | CACHEDIR.TAG **and** .rustc_info.json *(inside)* | the target directory itself, whatever `CARGO_TARGET_DIR` called it |
 | Gradle       | build.gradle*             | build, .gradle                                                            |
 | Maven        | pom.xml                   | target                                                                    |
 | SBT          | build.sbt                 | target, project/target                                                    |
-| NodeJS       | package.json              | node_modules, .next, .nuxt, .turbo, .svelte-kit, .parcel-cache            |
+| NodeJS       | package.json              | node_modules, .next, .nuxt, .turbo, .svelte-kit, .parcel-cache, .npm-cache |
 | Angular      | angular.json              | .angular/cache                                                            |
 | Python venv  | pyvenv.cfg *(inside)*     | the virtual environment itself                                            |
 | Python       | *.py                      | \_\_pycache\_\_                                                           |
 | Python       | pyproject.toml, setup.py  | .pytest_cache, .mypy_cache, .ruff_cache, .tox, .nox, .hypothesis, build, dist |
 | .NET         | *.csproj, *.fsproj        | bin, obj                                                                  |
 | CMake        | CMakeLists.txt            | cmake-build-*, CMakeFiles                                                 |
+| CMake        | CMakeCache.txt *(inside)* | the build directory itself, whatever it was called                        |
 | Zig          | build.zig                 | .zig-cache, zig-cache, zig-out                                            |
 | SwiftPM      | Package.swift             | .build                                                                    |
 | XCode        | *.xcodeproj               | DerivedData                                                               |
@@ -76,17 +78,32 @@ markers must be present, so a rule only fires on real evidence of a project.
 | Stack        | stack.yaml                | .stack-work                                                               |
 | Flutter/Dart | pubspec.yaml              | build, .dart_tool                                                         |
 | Unity        | Assets **and** ProjectSettings | Library, Temp, Obj, Logs                                             |
+| Trunk        | Trunk.toml                | dist                                                                      |
 | Terraform    | *.tf                      | .terraform                                                                |
 | Composer     | composer.json             | vendor                                                                    |
 | Git worktree | .git                      | records of worktrees whose checkout is gone                               |
 | Make         | Makefile                  | runs `make clean` — **opt-in**, see below                                 |
 
-Three rule shapes go beyond a plain sibling match:
+And, behind `--caches`, the caches a tool keeps once for the whole machine
+rather than per project:
+
+| Rule name      | Directory                          | Reclaims                       |
+|----------------|------------------------------------|--------------------------------|
+| Cargo registry | `$CARGO_HOME`, or `~/.cargo`, `/registry` | cache, src              |
+| Cargo git      | `$CARGO_HOME`, or `~/.cargo`, `/git`      | checkouts, db           |
+| Gradle cache   | `$GRADLE_USER_HOME`, or `~/.gradle`       | caches, daemon          |
+| Tool cache     | `$XDG_CACHE_HOME`, or `~/.cache`          | sccache, ccache, miri, trunk, .wasm-pack, node-gyp, pnpm, yarn, puppeteer, pip, uv, go-build |
+
+Four rule shapes go beyond a plain sibling match:
 
 * **Nested targets** such as `.angular/cache` reclaim only the inner directory.
 * **Self-marked** artifacts are identified by what they *contain*. A Python
   virtual environment is any directory holding a `pyvenv.cfg`, whatever it is
-  called.
+  called; a CMake build directory is any directory holding a `CMakeCache.txt`.
+* **Anchored** rules name one exact directory instead of matching markers. That
+  is what identifies a shared cache: nothing inside `~/.cache/sccache` says it
+  is one, and a marker that described its shape would describe every other
+  content-addressed store just as well.
 * **Git worktree records** are checked against their `gitdir` pointer, so only
   the ones `git worktree prune` would remove are offered. Locked records are
   left alone.
@@ -96,6 +113,25 @@ Three rule shapes go beyond a plain sibling match:
 A rule such as `make clean` runs a script the scanned directory controls.
 Enabling that for an ordinary scan would execute arbitrary code from any tree
 that happens to contain a `Makefile`, so it requires `--allow-commands`.
+
+### Shared caches are opt-in
+
+A cache under `~/.cargo` or `~/.cache` is not project output. It belongs to
+every project on the machine at once, so reclaiming it during a scan of one
+directory would reach far outside what was asked for. `--caches` asks for it
+explicitly, and opens the hidden directories those caches live in, so it does
+not also need `--all`.
+
+Only true caches are listed: everything under `--caches` is refetched or
+rebuilt on demand, so losing it costs time and nothing else. Installed software
+that merely happens to be large is left alone — `~/.rustup/toolchains`,
+`~/.gradle/wrapper` and globally installed npm packages are managed with
+`rustup toolchain uninstall` and `npm -g uninstall`, which keep each tool's own
+bookkeeping straight where deleting the directory would not.
+
+An anchored rule is still only reached by walking. A cache outside the tree you
+pointed `ocy` at stays untouched, so `ocy --caches ~/code` reclaims nothing from
+`~/.cargo`.
 
 ### Colour
 
@@ -143,8 +179,13 @@ and why.
 ```
 Usage: ocy [OPTIONS]
 
+Positional arguments:
+  start_dir              start directory (defaults to current directory)
+
 Optional arguments:
   -h, --help             print help message
+  -r, --rule RULES       apply only these rules (repeatable)
+  -l, --rules            list all available rules
   -i, --ignore PATH[,PATH...]
                          ignore path(s), repeatable
   -V, --version          print version
@@ -153,6 +194,7 @@ Optional arguments:
   -a, --all              walk into hidden dirs
   -n, --dry-run          report what would be reclaimed, then exit without deleting
   -A, --allow-commands   allow rules that run a project's own clean command (e.g. `make clean`)
+      --caches           also reclaim shared tool caches (cargo registry and git, sccache, ...)
   -m, --max-depth N      do not descend deeper than this many levels
   -x, --one-file-system  do not cross onto another filesystem
 ```

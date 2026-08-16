@@ -215,7 +215,7 @@ impl<FS: FileSystem, N: WalkNotifier> Walker<FS, N> {
         let mut entries = listing.entries;
 
         for rule in &self.rules {
-            if !rule.matches(&entries) {
+            if !rule.matches(&dir.path, &entries) {
                 continue;
             }
 

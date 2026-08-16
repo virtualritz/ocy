@@ -1,16 +1,100 @@
-use super::{SCANNED_HIDDEN_DIRS, standard_rules};
-use ocy_core::walker::VCS_DIRS;
+use super::{SCANNED_HIDDEN_DIRS, scanned_hidden, standard_rules};
+use ocy_core::filesystem::{FileSystem, RealFileSystem};
+use ocy_core::models::{FileInfo, RemovalAction, RemovalCandidate};
+use ocy_core::rule::Rule;
+use ocy_core::walker::{VCS_DIRS, WalkNotifier, WalkOptions, Walker};
+use std::fs;
+use std::path::Path;
+use std::sync::Mutex;
+
+#[derive(Default)]
+struct SilentNotifier {
+    to_remove: Mutex<Vec<RemovalCandidate>>,
+}
+
+impl WalkNotifier for &SilentNotifier {
+    fn notify_entered_directory(&self, _dir: &FileInfo) {}
+
+    fn notify_candidate_for_removal(&self, candidate: RemovalCandidate) {
+        self.to_remove
+            .lock()
+            .expect("notifier lock")
+            .push(candidate);
+    }
+
+    fn notify_fail_to_scan(&self, _dir: &FileInfo, _report: eyre::Report) {}
+
+    fn notify_walk_finish(&self) {}
+}
+
+/// Run the default rule set over a real tree of `paths`, and report what it would
+/// reclaim, relative to the root.
+///
+/// A trailing `/` makes a directory; anything else is an empty file. Going through the
+/// walker rather than asking rules directly is what makes these tests worth having: it
+/// covers whether a rule's directory is reached at all, not only whether it matches.
+fn reclaimed(paths: &[&str], rules: Vec<Rule>) -> eyre::Result<Vec<String>> {
+    let root = tempfile::tempdir()?;
+
+    for path in paths {
+        let full = root.path().join(path.trim_end_matches('/'));
+        if path.ends_with('/') {
+            fs::create_dir_all(&full)?;
+        } else {
+            if let Some(parent) = full.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&full, b"")?;
+        }
+    }
+
+    reclaimed_at(root.path(), rules)
+}
+
+/// [`reclaimed`] for a tree that is already on disk.
+///
+/// The walk is told to enter hidden directories: the fixtures deliberately contain them,
+/// and which of them a rule set opens by default is covered separately.
+fn reclaimed_at(root: &Path, rules: Vec<Rule>) -> eyre::Result<Vec<String>> {
+    let options = WalkOptions {
+        walk_all: true,
+        ..Default::default()
+    };
+    let start = RealFileSystem.directory_from_current(Some(root))?;
+    let notifier = SilentNotifier::default();
+    Walker::new(RealFileSystem, rules, &notifier, options).walk_from_path(&start);
+
+    let mut found: Vec<String> = notifier
+        .to_remove
+        .into_inner()
+        .expect("notifier lock")
+        .into_iter()
+        .filter_map(|candidate| match candidate.action {
+            RemovalAction::Delete { file_info, .. } => Some(
+                file_info
+                    .path
+                    .strip_prefix(root)
+                    .unwrap_or(&file_info.path)
+                    .display()
+                    .to_string(),
+            ),
+            RemovalAction::RunCommand { .. } => None,
+        })
+        .collect();
+    found.sort();
+    Ok(found)
+}
 
 #[test]
 fn the_built_in_rule_set_is_valid() -> eyre::Result<()> {
-    assert!(!standard_rules(false)?.is_empty());
+    assert!(!standard_rules(false, false)?.is_empty());
     Ok(())
 }
 
 #[test]
 fn command_rules_are_opt_in() -> eyre::Result<()> {
-    let without = standard_rules(false)?.len();
-    let with = standard_rules(true)?.len();
+    let without = standard_rules(false, false)?.len();
+    let with = standard_rules(true, false)?.len();
 
     assert_eq!(
         without + 1,
@@ -22,12 +106,124 @@ fn command_rules_are_opt_in() -> eyre::Result<()> {
 
 #[test]
 fn no_command_rule_is_present_by_default() -> eyre::Result<()> {
-    let names: Vec<String> = standard_rules(false)?
+    let names: Vec<String> = standard_rules(false, false)?
         .iter()
         .map(|rule| rule.name.to_string())
         .collect();
 
     assert!(!names.contains(&"Make".to_string()), "got {names:?}");
+    Ok(())
+}
+
+/// A shared cache belongs to every project on the machine, so a scan of one directory
+/// must not reclaim it without being asked.
+#[test]
+fn cache_rules_are_opt_in() -> eyre::Result<()> {
+    let default: Vec<String> = standard_rules(false, false)?
+        .iter()
+        .map(|rule| rule.name.to_string())
+        .collect();
+
+    assert!(
+        standard_rules(false, true)?.len() > default.len(),
+        "--caches should add rules"
+    );
+    assert!(
+        !default.contains(&"Tool cache".to_string()),
+        "got {default:?}"
+    );
+    Ok(())
+}
+
+/// Every cache rule names the one directory it applies to. A marker-matched cache rule
+/// would be free to fire against any project directory that happened to look similar.
+#[test]
+fn every_cache_rule_is_anchored_to_a_path() -> eyre::Result<()> {
+    let default = standard_rules(false, false)?.len();
+
+    let unanchored: Vec<String> = standard_rules(false, true)?
+        .into_iter()
+        .skip(default)
+        .filter(|rule| rule.anchor().is_none())
+        .map(|rule| rule.name.to_string())
+        .collect();
+
+    assert!(unanchored.is_empty(), "not anchored: {unanchored:?}");
+    Ok(())
+}
+
+/// No project rule may be anchored: anchoring one to the machine it was written on would
+/// stop it matching anywhere else.
+#[test]
+fn no_default_rule_is_anchored() -> eyre::Result<()> {
+    let anchored: Vec<String> = standard_rules(true, false)?
+        .into_iter()
+        .filter(|rule| rule.anchor().is_some())
+        .map(|rule| rule.name.to_string())
+        .collect();
+
+    assert!(anchored.is_empty(), "anchored: {anchored:?}");
+    Ok(())
+}
+
+/// `CARGO_TARGET_DIR` moves and renames the target directory, leaving no `Cargo.toml`
+/// beside it for the sibling rule to key on.
+#[test]
+fn a_renamed_cargo_target_directory_is_still_found() -> eyre::Result<()> {
+    let found = reclaimed(
+        &[
+            "app/Cargo.toml",
+            "app/target-alt/CACHEDIR.TAG",
+            "app/target-alt/.rustc_info.json",
+            "app/target-alt/debug/",
+            // A cache tagged the same way, but not by cargo.
+            "elsewhere/CACHEDIR.TAG",
+        ],
+        standard_rules(false, false)?,
+    )?;
+
+    assert_eq!(vec!["app/target-alt"], found);
+    Ok(())
+}
+
+/// A CMake build directory is named by whoever configured it, and often sits beside the
+/// source rather than inside it, so the only thing that reliably identifies one is the
+/// cache file CMake writes into it.
+#[test]
+fn a_cmake_build_directory_is_found_whatever_it_is_called() -> eyre::Result<()> {
+    let found = reclaimed(
+        &[
+            "proj/CMakeLists.txt",
+            "proj/build_debug/CMakeCache.txt",
+            "proj/Linux-x86_64-optimize/CMakeCache.txt",
+            "proj/src/main.cpp",
+        ],
+        standard_rules(false, false)?,
+    )?;
+
+    assert_eq!(
+        vec!["proj/Linux-x86_64-optimize", "proj/build_debug"],
+        found
+    );
+    Ok(())
+}
+
+/// `dist` is keyed on `Trunk.toml` rather than on the manifest beside it, because a
+/// `dist` next to a `Cargo.toml` is as often something the project keeps.
+#[test]
+fn a_dist_directory_is_only_claimed_for_a_trunk_project() -> eyre::Result<()> {
+    let found = reclaimed(
+        &[
+            "wasm-app/Trunk.toml",
+            "wasm-app/Cargo.toml",
+            "wasm-app/dist/index.html",
+            "packaged/Cargo.toml",
+            "packaged/dist/release.tar.gz",
+        ],
+        standard_rules(false, false)?,
+    )?;
+
+    assert_eq!(vec!["wasm-app/dist"], found);
     Ok(())
 }
 
@@ -48,4 +244,44 @@ fn every_scanned_hidden_directory_is_actually_hidden() {
     for hidden in SCANNED_HIDDEN_DIRS {
         assert!(hidden.starts_with('.'), "{hidden} needs no allow-listing");
     }
+}
+
+/// Without this, `--caches` would silently need `--all` beside it to find anything.
+#[test]
+fn enabling_caches_opens_the_hidden_directories_they_live_in() -> eyre::Result<()> {
+    let rules = standard_rules(false, true)?;
+    let opened = scanned_hidden(&rules);
+
+    for anchor in rules.iter().filter_map(Rule::anchor) {
+        for component in super::hidden_components(anchor) {
+            assert!(opened.contains(&component), "{component} stays unscanned");
+        }
+    }
+    Ok(())
+}
+
+/// The default scan must not gain reach it did not have before.
+#[test]
+fn the_default_rule_set_opens_no_extra_hidden_directories() -> eyre::Result<()> {
+    let default = scanned_hidden(&standard_rules(true, false)?);
+
+    assert_eq!(SCANNED_HIDDEN_DIRS.len(), default.len(), "got {default:?}");
+    Ok(())
+}
+
+/// A cache rule must reclaim its own anchor and nothing that merely looks like it.
+#[test]
+fn a_cache_rule_reclaims_only_the_cache_it_names() -> eyre::Result<()> {
+    let root = tempfile::tempdir()?;
+    let cache = root.path().join(".cache");
+    fs::create_dir_all(cache.join("sccache"))?;
+    fs::create_dir_all(root.path().join("project/.cache/sccache"))?;
+
+    let found = reclaimed_at(
+        root.path(),
+        vec![Rule::remove_at("Tool cache", cache, &["sccache"])?],
+    )?;
+
+    assert_eq!(vec![".cache/sccache"], found);
+    Ok(())
 }

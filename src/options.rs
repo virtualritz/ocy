@@ -69,6 +69,15 @@ pub struct OcyOptions {
     )]
     pub allow_commands: bool,
 
+    /// Long form only, deliberately: this reaches outside the tree being scanned, which
+    /// is not something to hand a one-letter flag that is easy to type by accident.
+    #[options(
+        no_short,
+        long = "caches",
+        help = "also reclaim shared tool caches (cargo registry and git, sccache, ...)"
+    )]
+    pub clean_caches: bool,
+
     #[options(
         long = "max-depth",
         meta = "N",
