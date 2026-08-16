@@ -125,7 +125,10 @@ fn perform_walk(
     let walker = Walker::new(RealFileSystem, rules, &notifier, walk_options);
 
     walker.walk_from_path(start_directory);
-    Ok(notifier.to_remove.into_inner())
+    Ok(notifier
+        .to_remove
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
 fn perform_clean(current_directory: &FileInfo, files: Vec<RemovalCandidate>, animated: bool) {

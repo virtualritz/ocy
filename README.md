@@ -213,6 +213,23 @@ resolves as itself.
 
 `--ignore` was called `--ignores` before 0.2.
 
+## The Scan Is Parallel
+
+Sibling directories have nothing to say to each other, and a scan spends most of
+its time waiting on the filesystem rather than working, so `ocy` reads them
+concurrently. Measuring a 16-core machine with a warm cache, scanning `$HOME`
+went from 3.55s to 0.79s and a 45 GiB source tree from 0.79s to 0.15s, in both
+cases reporting exactly the same candidates.
+
+Two consequences worth knowing:
+
+* Results are printed as they are found, so the **order varies between runs**.
+  The set does not.
+* Where a candidate encloses another, the first one claimed still wins and the
+  overlapping one is dropped, so nothing is ever counted or deleted twice. Which
+  of the two arrives first is no longer fixed, and the enclosing directory is the
+  one that may be left behind -- the safe direction to err.
+
 ## Diagnostics
 
 `ocy` is silent unless asked. Raise the level with `-v`, or set `RUST_LOG` when

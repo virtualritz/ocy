@@ -3,18 +3,21 @@ use crate::filesystem::FileSystem;
 use crate::models::{FileInfo, RemovalAction, RemovalCandidate};
 use crate::rule::Rule;
 use crate::test_utils::{MockFs, MockFsNode};
-use std::{cell::RefCell, collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, path::PathBuf, sync::Mutex};
 
 #[derive(Debug, Default)]
 struct VecWalkNotifier {
-    to_remove: RefCell<Vec<RemovalCandidate>>,
+    to_remove: Mutex<Vec<RemovalCandidate>>,
 }
 
 impl WalkNotifier for &VecWalkNotifier {
     fn notify_entered_directory(&self, _dir: &FileInfo) {}
 
     fn notify_candidate_for_removal(&self, candidate: RemovalCandidate) {
-        self.to_remove.borrow_mut().push(candidate);
+        self.to_remove
+            .lock()
+            .expect("notifier lock")
+            .push(candidate);
     }
 
     fn notify_fail_to_scan(&self, _e: &FileInfo, _report: eyre::Error) {}
@@ -34,6 +37,7 @@ fn reclaimed(tree: MockFsNode, rules: Vec<Rule>, options: WalkOptions) -> Vec<St
     let mut paths: Vec<String> = notifier
         .to_remove
         .into_inner()
+        .expect("notifier lock")
         .into_iter()
         .map(|candidate| match candidate.action {
             RemovalAction::Delete { file_info, .. } => file_info.path.display().to_string(),
@@ -332,6 +336,59 @@ fn never_claims_a_path_inside_another_candidate() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Sibling directories are walked concurrently, so a wide tree has to come back with
+/// every candidate, exactly once, however the branches happen to interleave.
+#[test]
+fn finds_every_candidate_across_a_wide_tree() -> eyre::Result<()> {
+    let projects: Vec<MockFsNode> = (0..256)
+        .map(|n| {
+            MockFsNode::dir(
+                &format!("project{n:03}"),
+                vec![
+                    MockFsNode::file("Cargo.toml"),
+                    MockFsNode::empty_dir("target"),
+                ],
+            )
+        })
+        .collect();
+
+    let found = reclaimed(under_home(projects), cargo_rule(), WalkOptions::default());
+
+    let unique: HashSet<&String> = found.iter().collect();
+    assert_eq!(256, found.len(), "dropped or duplicated candidates");
+    assert_eq!(found.len(), unique.len(), "reported a candidate twice");
+    Ok(())
+}
+
+/// A shared cache is named by its path, and directories called `.cache` are everywhere.
+/// An anchored rule has to pass over every one of them but its own.
+#[test]
+fn an_anchored_rule_fires_only_at_its_anchor() -> eyre::Result<()> {
+    let tree = under_home(vec![
+        MockFsNode::dir(".cache", vec![MockFsNode::empty_dir("sccache")]),
+        MockFsNode::dir(
+            "project",
+            vec![MockFsNode::dir(
+                ".cache",
+                vec![MockFsNode::empty_dir("sccache")],
+            )],
+        ),
+    ]);
+
+    let found = reclaimed(
+        tree,
+        vec![Rule::remove_at(
+            "Tool cache",
+            PathBuf::from("/home/user/.cache"),
+            &["sccache"],
+        )?],
+        hidden(&[".cache"]),
+    );
+
+    assert_eq!(vec!["/home/user/.cache/sccache"], found);
+    Ok(())
+}
+
 /// Walk a real temporary tree, rather than [`MockFs`], and return the reclaimed paths
 /// relative to the root.
 fn reclaimed_on_disk(
@@ -351,6 +408,7 @@ fn reclaimed_on_disk(
     let mut paths: Vec<String> = notifier
         .to_remove
         .into_inner()
+        .expect("notifier lock")
         .into_iter()
         .filter_map(|candidate| match candidate.action {
             RemovalAction::Delete { file_info, .. } => Some(
