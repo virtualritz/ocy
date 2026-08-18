@@ -35,6 +35,21 @@ fn recover<'a, T>(
 /// pure cost, so they are skipped even under [`WalkOptions::walk_all`].
 pub const VCS_DIRS: &[&str] = &[".git", ".svn", ".hg", ".jj", ".bzr"];
 
+/// Package installation trees, never descended into.
+///
+/// A `node_modules` belonging to a project is claimed whole by the rule that matched its
+/// manifest, so nothing inside one is ever reclaimed separately anyway. A `node_modules`
+/// that no rule claims is a different thing entirely: an install prefix such as
+/// `~/.n/lib/node_modules` holds installed *software*, and the `node_modules` inside each
+/// installed package holds the dependencies that program needs in order to run.
+///
+/// Descending would offer to delete exactly those. An installed package carries a
+/// `package.json`, so one level down it is indistinguishable from a project -- and
+/// reclaiming its dependencies leaves the program on disk but broken, with no build to
+/// recreate them. `npm` bundling its own dependencies that way is how the tool that would
+/// reinstall them becomes the casualty.
+pub const INSTALLED_DIRS: &[&str] = &["node_modules"];
+
 #[derive(Debug, Default, Clone)]
 pub struct WalkOptions {
     /// Absolute paths that are neither scanned nor reclaimed.
@@ -411,6 +426,9 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
     fn is_scannable_name(&self, name: &str) -> bool {
         if VCS_DIRS.contains(&name) {
             log::trace!("skipping {name}: version control metadata");
+            false
+        } else if INSTALLED_DIRS.contains(&name) {
+            log::trace!("skipping {name}: installed packages, not build output");
             false
         } else if name.starts_with('.') {
             let scannable = self.options.walk_all || self.options.scanned_hidden.contains(name);

@@ -207,10 +207,26 @@ nested target such as `.angular/cache` is resolved directly. The walk descends
 into `.venv`, which is self-marked and has to be looked inside, and into linked
 worktrees found as above. Use `--all` to descend into every hidden directory.
 Version control metadata (`.git`, `.svn`, `.hg`, `.jj`, `.bzr`) is never
-descended into.
+descended into, and neither is `node_modules`.
 
 If something you expected is missing, `ocy -vv` names every directory it skipped
 and why.
+
+### Installation trees are never descended into
+
+A project's `node_modules` is claimed whole, on the strength of the manifest
+beside it — so nothing inside one is ever reclaimed separately anyway. A
+`node_modules` that no rule claims is a different thing: an install prefix such
+as `~/.n/lib/node_modules` or a global npm prefix holds installed *software*, and
+the `node_modules` inside each installed package holds the dependencies that
+program needs in order to run.
+
+Descending would offer to delete exactly those. One level down, an installed
+package is indistinguishable from a project — it has a `package.json` and a
+`node_modules` beside it — but reclaiming its dependencies leaves the program on
+disk and broken, with no build that would recreate them. `npm` bundles its own
+dependencies that way, so the tool that could reinstall them is itself the first
+casualty.
 
 ## Usage
 

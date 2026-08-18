@@ -336,6 +336,66 @@ fn never_claims_a_path_inside_another_candidate() -> eyre::Result<()> {
     Ok(())
 }
 
+/// An install prefix is not a project tree. `~/.n/lib/node_modules/npm` carries a
+/// `package.json` and a `node_modules` full of the dependencies npm needs to run, so
+/// descending one level would offer to delete them and leave npm on disk but broken.
+#[test]
+fn never_descends_into_an_installation_tree() -> eyre::Result<()> {
+    let tree = under_home(vec![MockFsNode::dir(
+        "lib",
+        vec![MockFsNode::dir(
+            "node_modules",
+            vec![MockFsNode::dir(
+                "npm",
+                vec![
+                    MockFsNode::file("package.json"),
+                    MockFsNode::dir("node_modules", vec![MockFsNode::empty_dir("graceful-fs")]),
+                ],
+            )],
+        )],
+    )]);
+
+    let rules = vec![Rule::remove(
+        "NodeJS",
+        &["package.json"],
+        &["node_modules"],
+    )?];
+    let options = WalkOptions {
+        walk_all: true,
+        ..Default::default()
+    };
+    let found = reclaimed(tree, rules, options);
+
+    assert!(
+        found.is_empty(),
+        "offered to gut an install prefix: {found:?}"
+    );
+    Ok(())
+}
+
+/// Not descending must not stop a project's own `node_modules` being claimed: that fires
+/// on the manifest beside it, not by looking inside.
+#[test]
+fn still_reclaims_a_projects_own_node_modules() -> eyre::Result<()> {
+    let tree = under_home(vec![MockFsNode::dir(
+        "app",
+        vec![
+            MockFsNode::file("package.json"),
+            MockFsNode::dir("node_modules", vec![MockFsNode::empty_dir("left-pad")]),
+        ],
+    )]);
+
+    let rules = vec![Rule::remove(
+        "NodeJS",
+        &["package.json"],
+        &["node_modules"],
+    )?];
+    let found = reclaimed(tree, rules, WalkOptions::default());
+
+    assert_eq!(vec!["/home/user/app/node_modules"], found);
+    Ok(())
+}
+
 /// Sibling directories are walked concurrently, so a wide tree has to come back with
 /// every candidate, exactly once, however the branches happen to interleave.
 #[test]
