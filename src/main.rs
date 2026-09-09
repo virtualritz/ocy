@@ -14,7 +14,7 @@ use ocy_core::rule::Rule;
 use ocy_core::rule::widest_name;
 use ocy_core::walker::{WalkOptions, Walker};
 use ocy_core::{cleaner::Cleaner, models::RemovalCandidate};
-use rules::{protected_state_dirs, rule_names, scanned_hidden, standard_rules};
+use rules::{protected_state_dirs, rule_name_matches, rule_names, scanned_hidden, standard_rules};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -100,9 +100,12 @@ fn rules_for_options(options: &OcyOptions) -> Result<Vec<Rule>> {
 
     let selected_rules = options.selected_rules();
 
-    for rule_name in selected_rules {
-        if !all_rule_names.contains(rule_name.as_str()) {
-            eyre::bail!("Unknown rule: {}", rule_name);
+    for requested in selected_rules {
+        if !all_rule_names
+            .iter()
+            .any(|name| rule_name_matches(name, requested))
+        {
+            eyre::bail!("Unknown rule: {}", requested);
         }
     }
 
@@ -111,7 +114,11 @@ fn rules_for_options(options: &OcyOptions) -> Result<Vec<Rule>> {
     } else {
         all_rules
             .into_iter()
-            .filter(|rule| selected_rules.contains(&rule.name.to_string()))
+            .filter(|rule| {
+                selected_rules
+                    .iter()
+                    .any(|requested| rule_name_matches(&rule.name, requested))
+            })
             .collect()
     };
     Ok(filtered_rules)

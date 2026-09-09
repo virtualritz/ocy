@@ -401,3 +401,26 @@ fn an_xdg_state_dir_is_never_reclaimed_even_under_walk_all() -> eyre::Result<()>
     );
     Ok(())
 }
+
+/// `--rule` is typed by hand, so its casing should not matter.
+#[test]
+fn rule_name_matching_is_case_insensitive() {
+    assert!(super::rule_name_matches("Cargo", "cargo"));
+    assert!(super::rule_name_matches("Cargo", "CARGO"));
+    assert!(super::rule_name_matches("Cargo", "Cargo"));
+}
+
+/// `Cargo` is the build tool; `Rust` is the language someone scanning their own machine
+/// is more likely to type.
+#[test]
+fn rust_is_a_synonym_for_the_cargo_rule() {
+    assert!(super::rule_name_matches("Cargo", "rust"));
+    assert!(super::rule_name_matches("Cargo", "Rust"));
+}
+
+/// A synonym must not turn into a match for every rule.
+#[test]
+fn a_synonym_does_not_match_an_unrelated_rule() {
+    assert!(!super::rule_name_matches("Gradle", "rust"));
+    assert!(!super::rule_name_matches("NodeJS", "cargo"));
+}

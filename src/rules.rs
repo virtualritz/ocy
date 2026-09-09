@@ -313,6 +313,24 @@ pub fn rule_names(rules: &[Rule]) -> HashSet<Arc<str>> {
     rules.iter().map(|rule| rule.name.clone()).collect()
 }
 
+/// A `--rule` value the rule itself is not named, matched ahead of the rule names.
+///
+/// `Cargo` is the build tool; `Rust` is the language someone scanning their own machine
+/// is more likely to type.
+const RULE_SYNONYMS: &[(&str, &str)] = &[("rust", "Cargo")];
+
+/// Whether a `--rule` value selects `rule_name`.
+///
+/// Case-insensitive, and through [`RULE_SYNONYMS`] first: `--rule Cargo`, `--rule cargo`
+/// and `--rule rust` all select the same rule.
+pub fn rule_name_matches(rule_name: &str, requested: &str) -> bool {
+    let requested = RULE_SYNONYMS
+        .iter()
+        .find(|(synonym, _)| synonym.eq_ignore_ascii_case(requested))
+        .map_or(requested, |(_, canonical)| *canonical);
+    rule_name.eq_ignore_ascii_case(requested)
+}
+
 /// The user's live XDG state, kept out of every rule regardless of `--all`.
 ///
 /// `XDG_CONFIG_HOME` (default `~/.config`), `XDG_DATA_HOME` (default `~/.local/share`)
