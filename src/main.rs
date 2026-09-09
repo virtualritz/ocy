@@ -14,7 +14,7 @@ use ocy_core::rule::Rule;
 use ocy_core::rule::widest_name;
 use ocy_core::walker::{WalkOptions, Walker};
 use ocy_core::{cleaner::Cleaner, models::RemovalCandidate};
-use rules::{rule_names, scanned_hidden, standard_rules};
+use rules::{protected_state_dirs, rule_names, scanned_hidden, standard_rules};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -51,8 +51,11 @@ fn run(options: &OcyOptions) -> Result<ExitCode> {
 
     let rules = rules_for_options(options)?;
 
+    let mut ignores = options.ignores_set()?;
+    ignores.extend(protected_state_dirs());
+
     let walk_options = WalkOptions {
-        ignores: options.ignores_set()?,
+        ignores,
         walk_all: options.walk_all,
         scanned_hidden: scanned_hidden(&rules),
         max_depth: options.max_depth,

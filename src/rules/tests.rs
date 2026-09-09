@@ -340,3 +340,64 @@ fn no_cache_entry_names_a_directory_holding_installed_software() {
         );
     }
 }
+
+/// With no environment override, protection falls back to the ordinary `~/.config`,
+/// `~/.local/share` and `~/.local/state` -- the locations `--all` would otherwise expose.
+#[test]
+fn protected_state_dirs_default_to_the_ordinary_xdg_locations() {
+    let home = super::home_directory().expect("tests run with a home directory");
+    let protected = super::protected_state_dirs();
+
+    for default in [".config", ".local/share", ".local/state"] {
+        let Ok(expected) = home.join(default).canonicalize() else {
+            // Nothing has ever created this one on the machine running the test; there
+            // is nothing under it that protecting it would change.
+            continue;
+        };
+        assert!(
+            protected.contains(&expected),
+            "{} not protected: got {protected:?}",
+            expected.display()
+        );
+    }
+}
+
+/// An installed application's own bundle can look exactly like a project -- Discord
+/// ships a `package.json` beside each native module -- so this reproduces that shape and
+/// checks it survives a `--all --caches` scan once it sits under a protected XDG
+/// location, while confirming the same tree *would* otherwise be reclaimed.
+#[test]
+fn an_xdg_state_dir_is_never_reclaimed_even_under_walk_all() -> eyre::Result<()> {
+    let root = tempfile::tempdir()?;
+    let app = root.path().join("config/some-app");
+    fs::create_dir_all(app.join("node_modules/dep"))?;
+    fs::write(app.join("package.json"), b"{}")?;
+
+    let rules = || standard_rules(false, false);
+
+    let unprotected = reclaimed_at(root.path(), rules()?)?;
+    assert_eq!(
+        vec!["config/some-app/node_modules"],
+        unprotected,
+        "the fixture should look like an ordinary NodeJS project without protection"
+    );
+
+    let options = WalkOptions {
+        walk_all: true,
+        ignores: std::collections::HashSet::from([app.canonicalize()?]),
+        ..Default::default()
+    };
+    let start = RealFileSystem.directory_from_current(Some(root.path()))?;
+    let notifier = SilentNotifier::default();
+    Walker::new(RealFileSystem, rules()?, &notifier, options).walk_from_path(&start);
+
+    assert!(
+        notifier
+            .to_remove
+            .into_inner()
+            .expect("notifier lock")
+            .is_empty(),
+        "an ignored XDG state dir must not be reclaimed"
+    );
+    Ok(())
+}

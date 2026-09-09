@@ -313,6 +313,39 @@ pub fn rule_names(rules: &[Rule]) -> HashSet<Arc<str>> {
     rules.iter().map(|rule| rule.name.clone()).collect()
 }
 
+/// The user's live XDG state, kept out of every rule regardless of `--all`.
+///
+/// `XDG_CONFIG_HOME` (default `~/.config`), `XDG_DATA_HOME` (default `~/.local/share`)
+/// and `XDG_STATE_HOME` (default `~/.local/state`) hold every installed application's
+/// own settings and data, not build output. An app that happens to bundle a
+/// `package.json` beside a `node_modules` -- Discord's own native modules do -- looks
+/// exactly like a project to the ordinary rules once `--all` lets the walk reach it, and
+/// reclaiming its `node_modules` breaks the installed program rather than freeing
+/// anything disposable.
+///
+/// Resolved from the environment rather than matched by name, so a variable pointed
+/// somewhere unusual is still covered: naming `.config` the way [`SCANNED_HIDDEN_DIRS`]
+/// names directories would miss that, and would also catch an unrelated directory that
+/// happens to share the name deep inside some project.
+///
+/// A location that fails to canonicalize -- nothing has created it yet -- is simply
+/// left out: there is nothing under it to protect.
+pub fn protected_state_dirs() -> Vec<PathBuf> {
+    let Some(home) = home_directory() else {
+        log::warn!("cannot locate the home directory, so no XDG state is protected");
+        return Vec::new();
+    };
+
+    [
+        env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
+        env_dir("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share")),
+        env_dir("XDG_STATE_HOME").unwrap_or_else(|| home.join(".local/state")),
+    ]
+    .into_iter()
+    .filter_map(|path| path.canonicalize().ok())
+    .collect()
+}
+
 /// The hidden directories a scan with these rules needs to enter.
 ///
 /// A cache anchor lives behind a leading dot -- `~/.cargo`, `~/.cache` -- so a rule
