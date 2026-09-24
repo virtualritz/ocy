@@ -134,6 +134,31 @@ impl Rule {
         })
     }
 
+    /// [`Rule::remove_at`], for targets that are not plain directories.
+    ///
+    /// A system package cache keeps its downloads as loose files beside a lock and a
+    /// working directory the package manager needs to keep, so directories alone cannot
+    /// say what to reclaim from it.
+    pub fn remove_targets_at(
+        name: &str,
+        anchor: PathBuf,
+        targets: Vec<Target>,
+    ) -> Result<Self, RuleError> {
+        if targets.is_empty() {
+            Err(RuleError::NoTargets {
+                name: name.to_string(),
+            })
+        } else {
+            Ok(Self {
+                name: name.into(),
+                // As for `remove_at`: the anchor alone identifies the directory.
+                markers: Vec::new(),
+                anchor: Some(anchor),
+                action: CleanAction::Remove(targets),
+            })
+        }
+    }
+
     /// A rule that reclaims `targets`, for targets that are not plain directories.
     pub fn remove_targets(
         name: &str,

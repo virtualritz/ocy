@@ -36,6 +36,8 @@ const RULE_TINTS: &[(&str, (u8, u8, u8))] = &[
     ("Cargo git", (190, 135, 100)),
     ("Gradle cache", (110, 165, 160)),
     ("Tool cache", (140, 150, 165)),
+    // Debian's red, muted like the other shared caches.
+    ("APT cache", (185, 95, 120)),
 ];
 
 /// Tints used for rules with no curated entry.

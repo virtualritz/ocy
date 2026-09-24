@@ -73,6 +73,19 @@ fn an_anchored_rule_needs_no_markers() -> Result<(), RuleError> {
     Ok(())
 }
 
+/// Anchoring must not depend on the kind of target: a rule reclaiming loose files is
+/// just as confined to its own directory as one reclaiming directories.
+#[test]
+fn an_anchored_file_rule_applies_only_to_its_own_directory() -> Result<(), RuleError> {
+    let targets = vec![Target::file("archives/*.deb").expect("valid pattern")];
+    let rule = Rule::remove_targets_at("APT cache", PathBuf::from("/var/cache/apt"), targets)?;
+
+    assert!(rule.matches(Path::new("/var/cache/apt"), &[]));
+    assert!(!rule.matches(Path::new("/home/u/mirror/apt"), &[]));
+    assert_eq!(Some(Path::new("/var/cache/apt")), rule.anchor());
+    Ok(())
+}
+
 #[test]
 fn an_unanchored_rule_reports_no_anchor() -> Result<(), RuleError> {
     assert_eq!(
@@ -104,6 +117,10 @@ fn rejects_a_rule_that_reclaims_nothing() {
     ));
     assert!(matches!(
         Rule::remove_at("Bad", PathBuf::from("/home/u/.cache"), &[]),
+        Err(RuleError::NoTargets { .. })
+    ));
+    assert!(matches!(
+        Rule::remove_targets_at("Bad", PathBuf::from("/var/cache/apt"), Vec::new()),
         Err(RuleError::NoTargets { .. })
     ));
 }

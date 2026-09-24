@@ -286,6 +286,51 @@ fn a_cache_rule_reclaims_only_the_cache_it_names() -> eyre::Result<()> {
     Ok(())
 }
 
+/// The apt rule has to reclaim what `apt-get clean` does and keep what it keeps: the lock
+/// and the `partial` directory apt downloads into.
+#[test]
+fn the_apt_cache_rule_reclaims_what_apt_get_clean_does() -> eyre::Result<()> {
+    let root = tempfile::tempdir()?;
+    let apt = root.path().join("var/cache/apt");
+    fs::create_dir_all(apt.join("archives/partial"))?;
+    for file in [
+        "archives/git_2.43.0_amd64.deb",
+        "archives/lock",
+        "archives/partial/zstd_1.5.5_amd64.deb.FAILED",
+        "pkgcache.bin",
+        "srcpkgcache.bin",
+    ] {
+        fs::write(apt.join(file), b"")?;
+    }
+    // A mirror elsewhere that happens to share the layout is not apt's cache.
+    fs::create_dir_all(root.path().join("mirror/apt/archives"))?;
+    fs::write(root.path().join("mirror/apt/archives/git.deb"), b"")?;
+
+    let found = reclaimed_at(root.path(), vec![super::apt_cache_rule(apt.clone())?])?;
+
+    assert_eq!(
+        vec![
+            "var/cache/apt/archives/git_2.43.0_amd64.deb",
+            "var/cache/apt/archives/partial/zstd_1.5.5_amd64.deb.FAILED",
+            "var/cache/apt/pkgcache.bin",
+            "var/cache/apt/srcpkgcache.bin",
+        ],
+        found
+    );
+    assert!(apt.join("archives/lock").exists());
+    Ok(())
+}
+
+/// The apt cache is shared by the whole machine, so it must stay behind `--caches`.
+#[test]
+fn the_apt_cache_rule_is_only_offered_with_caches() -> eyre::Result<()> {
+    let is_apt = |rule: &Rule| rule.anchor() == Some(Path::new(super::APT_CACHE));
+
+    assert!(!standard_rules(false, false)?.iter().any(is_apt));
+    assert!(standard_rules(false, true)?.iter().any(is_apt));
+    Ok(())
+}
+
 /// A tool's own variable is the one thing that reliably says where its cache went, so a
 /// moved cache has to be reclaimed where it now lives rather than where it usually does.
 #[test]
@@ -416,6 +461,13 @@ fn rule_name_matching_is_case_insensitive() {
 fn rust_is_a_synonym_for_the_cargo_rule() {
     assert!(super::rule_name_matches("Cargo", "rust"));
     assert!(super::rule_name_matches("Cargo", "Rust"));
+}
+
+#[test]
+fn apt_is_a_synonym_for_the_apt_cache_rule() {
+    assert!(super::rule_name_matches("APT cache", "apt"));
+    assert!(super::rule_name_matches("APT cache", "apt cache"));
+    assert!(!super::rule_name_matches("Cargo", "apt"));
 }
 
 /// A synonym must not turn into a match for every rule.

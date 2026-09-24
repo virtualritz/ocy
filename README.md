@@ -94,6 +94,18 @@ rather than per project:
 | Gradle cache   | `$GRADLE_USER_HOME`, or `~/.gradle`       | caches, daemon          |
 | Tool cache     | `$XDG_CACHE_HOME`, or `~/.cache` (and `~/Library/Caches` on macOS) | sccache, Mozilla.sccache, ccache, miri, trunk, .wasm-pack, node-gyp, pnpm, yarn, puppeteer, deno, pip, uv, go-build |
 | Tool cache     | `~`                                       | .ccache, .npm/_cacache, .local/share/pnpm/store, .bun/install/cache, .m2/repository, .ivy2/cache |
+| APT cache      | `/var/cache/apt`                          | archives/\*.deb, archives/partial/\*, pkgcache.bin, srcpkgcache.bin |
+
+The APT cache rule removes what `apt-get clean` removes, and keeps what it keeps:
+the `archives/lock` file and the `archives/partial` directory itself. The
+package lists in `/var/lib/apt/lists` are left alone, since without them apt
+knows no packages until the next `apt update`. The cache belongs to root, so
+only a scan run as root can remove anything from it (`-r apt` selects just this
+rule):
+
+```sh
+sudo ocy --caches -r apt /var/cache/apt
+```
 
 Each entry names the cache itself, not the directory holding it: `~/.npm` also
 holds logs, and `~/.local/share/pnpm` also holds the binaries pnpm installed.

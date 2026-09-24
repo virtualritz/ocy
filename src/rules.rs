@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ocy_core::rule::{Rule, RuleError};
+use ocy_core::rule::{Rule, RuleError, Target};
 
 /// Hidden directories the walk descends into by default.
 ///
@@ -208,6 +208,48 @@ const MOVED_CACHES: &[(&str, &str)] = &[
     ("XDG_DATA_HOME", "pnpm/store"),
 ];
 
+/// Where apt keeps the packages it has downloaded.
+///
+/// Fixed rather than read from apt's configuration, for the same reason cache locations
+/// are not read from config files: `Dir::Cache` is almost never moved, and a parser for
+/// apt's config format would be a lot of code to be wrong in for that case. Like every
+/// anchored path, it simply never matches on a system without apt.
+const APT_CACHE: &str = "/var/cache/apt";
+
+/// What `apt-get clean` removes, relative to [`APT_CACHE`].
+///
+/// Every downloaded package, anything a download left half-finished, and the two binary
+/// caches apt rebuilds from its package lists on its next run. The `archives/lock` file
+/// and the `archives/partial` directory itself stay, as they do under `apt-get clean`.
+/// The package lists in `/var/lib/apt/lists` are not a cache in this sense: without them
+/// apt knows no packages at all until the next `apt update`.
+const APT_CACHE_FILES: &[&str] = &["archives/*.deb", "pkgcache.bin", "srcpkgcache.bin"];
+const APT_CACHE_PARTIAL: &str = "archives/partial/*";
+
+/// The rule reclaiming apt's package cache at `anchor`.
+///
+/// The cache belongs to root, so only a scan run as root can actually remove anything;
+/// any other scan still reports what is there, and each removal then fails on its own.
+fn apt_cache_rule(anchor: PathBuf) -> Result<Rule, RuleError> {
+    const NAME: &str = "APT cache";
+    let invalid = |pattern: &str| {
+        let pattern = pattern.to_string();
+        move |source| RuleError::InvalidPattern {
+            name: NAME.to_string(),
+            pattern,
+            source,
+        }
+    };
+
+    let mut targets = APT_CACHE_FILES
+        .iter()
+        .map(|path| Target::file(path).map_err(invalid(path)))
+        .collect::<Result<Vec<_>, _>>()?;
+    targets.push(Target::any(APT_CACHE_PARTIAL).map_err(invalid(APT_CACHE_PARTIAL))?);
+
+    Rule::remove_targets_at(NAME, anchor, targets)
+}
+
 /// Rules for the caches that tools keep once for the whole machine.
 ///
 /// These are anchored to a path rather than matched by markers, because that is what
@@ -239,6 +281,7 @@ fn cache_rules() -> Result<Vec<Rule>, RuleError> {
         // distributions themselves, which is an installation rather than a cache.
         Rule::remove_at("Gradle cache", gradle, &["caches", "daemon"])?,
         Rule::remove_at("Tool cache", home.clone(), HOME_ENTRIES)?,
+        apt_cache_rule(PathBuf::from(APT_CACHE))?,
     ];
 
     for cache_home in cache_homes(&home) {
@@ -316,8 +359,8 @@ pub fn rule_names(rules: &[Rule]) -> HashSet<Arc<str>> {
 /// A `--rule` value the rule itself is not named, matched ahead of the rule names.
 ///
 /// `Cargo` is the build tool; `Rust` is the language someone scanning their own machine
-/// is more likely to type.
-const RULE_SYNONYMS: &[(&str, &str)] = &[("rust", "Cargo")];
+/// is more likely to type. `apt` is the command everyone knows the cache by.
+const RULE_SYNONYMS: &[(&str, &str)] = &[("rust", "Cargo"), ("apt", "APT cache")];
 
 /// Whether a `--rule` value selects `rule_name`.
 ///
