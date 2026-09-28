@@ -340,10 +340,152 @@ fn a_moved_cache_is_reclaimed_where_it_now_lives() -> eyre::Result<()> {
     fs::create_dir_all(moved.join("0"))?;
     fs::create_dir_all(root.path().join("scratch/keep"))?;
 
-    let rule = super::moved_cache_rule(&moved).expect("a nested path yields a rule")?;
+    let rule =
+        super::moved_cache_rule("Tool cache", &moved).expect("a nested path yields a rule")?;
     let found = reclaimed_at(root.path(), vec![rule])?;
 
     assert_eq!(vec!["scratch/sccache"], found);
+    Ok(())
+}
+
+/// A cache linked onto another disk has to be reclaimed where the link points: the walk
+/// reaches the real directory from there, and the link itself frees nothing.
+#[cfg(unix)]
+#[test]
+fn a_linked_cache_is_reclaimed_where_it_really_lives() -> eyre::Result<()> {
+    let root = tempfile::tempdir()?;
+    let root_path = root.path().canonicalize()?;
+    let cache = root_path.join("home/.cache");
+    let real = root_path.join("work/xdg/sccache");
+    fs::create_dir_all(real.join("0"))?;
+    fs::create_dir_all(&cache)?;
+    std::os::unix::fs::symlink(&real, cache.join("sccache"))?;
+
+    let rules = super::anchored("Tool cache", cache, &["sccache"])?;
+    let found = reclaimed_at(&root_path, rules)?;
+
+    assert_eq!(vec!["work/xdg/sccache"], found);
+    Ok(())
+}
+
+/// Scanning the home directory meets a linked cache only as the link, so the link has to
+/// be followed to its directory -- and the link itself left alone either way.
+#[cfg(unix)]
+#[test]
+fn a_linked_cache_is_followed_out_of_the_scanned_tree() -> eyre::Result<()> {
+    let root = tempfile::tempdir()?;
+    let root_path = root.path().canonicalize()?;
+    let home = root_path.join("home");
+    let real = root_path.join("work/sccache");
+    fs::create_dir_all(real.join("0"))?;
+    fs::create_dir_all(home.join(".cache"))?;
+    std::os::unix::fs::symlink(&real, home.join(".cache/sccache"))?;
+
+    let rules = || Rule::remove_at("Tool cache", home.join(".cache"), &["sccache"]);
+    let follow = |follow_links| -> eyre::Result<Vec<String>> {
+        let options = WalkOptions {
+            walk_all: true,
+            follow_links,
+            ..Default::default()
+        };
+        let start = RealFileSystem.directory_from_current(Some(&home))?;
+        let notifier = SilentNotifier::default();
+        Walker::new(RealFileSystem, vec![rules()?], &notifier, options).walk_from_path(&start);
+
+        Ok(notifier
+            .to_remove
+            .into_inner()
+            .expect("notifier lock")
+            .into_iter()
+            .filter_map(|candidate| match candidate.action {
+                RemovalAction::Delete { file_info, .. } => {
+                    Some(file_info.path.display().to_string())
+                }
+                RemovalAction::RunCommand { .. } => None,
+            })
+            .collect())
+    };
+
+    assert_eq!(vec![real.display().to_string()], follow(true)?);
+    assert!(follow(false)?.is_empty());
+    Ok(())
+}
+
+/// `~/.npm` is as likely to be the link as the cache inside it, so a link partway along
+/// a target has to be followed too.
+#[cfg(unix)]
+#[test]
+fn a_cache_behind_a_linked_parent_is_followed() -> eyre::Result<()> {
+    let root = tempfile::tempdir()?;
+    let root_path = root.path().canonicalize()?;
+    let home = root_path.join("home");
+    let real = root_path.join("work/npm");
+    fs::create_dir_all(real.join("_cacache"))?;
+    fs::create_dir_all(real.join("_logs"))?;
+    fs::create_dir_all(&home)?;
+    std::os::unix::fs::symlink(&real, home.join(".npm"))?;
+
+    let options = WalkOptions {
+        walk_all: true,
+        follow_links: true,
+        ..Default::default()
+    };
+    let rule = Rule::remove_at("Tool cache", home.clone(), &[".npm/_cacache"])?;
+    let start = RealFileSystem.directory_from_current(Some(&home))?;
+    let notifier = SilentNotifier::default();
+    Walker::new(RealFileSystem, vec![rule], &notifier, options).walk_from_path(&start);
+
+    let found: Vec<_> = notifier
+        .to_remove
+        .into_inner()
+        .expect("notifier lock")
+        .into_iter()
+        .filter_map(|candidate| match candidate.action {
+            RemovalAction::Delete { file_info, .. } => Some(file_info.path),
+            RemovalAction::RunCommand { .. } => None,
+        })
+        .collect();
+
+    assert_eq!(vec![real.join("_cacache")], found);
+    Ok(())
+}
+
+/// `~/.cargo/registry` itself is as easily linked away as the cache inside it, and the
+/// walk never enters a link, so the rule has to be reachable from outside it.
+#[cfg(unix)]
+#[test]
+fn a_cache_under_a_linked_anchor_is_followed() -> eyre::Result<()> {
+    let root = tempfile::tempdir()?;
+    let root_path = root.path().canonicalize()?;
+    let home = root_path.join("home");
+    let real = root_path.join("work/registry");
+    fs::create_dir_all(real.join("cache"))?;
+    fs::create_dir_all(real.join("index"))?;
+    fs::create_dir_all(home.join(".cargo"))?;
+    std::os::unix::fs::symlink(&real, home.join(".cargo/registry"))?;
+
+    let options = WalkOptions {
+        walk_all: true,
+        follow_links: true,
+        ..Default::default()
+    };
+    let rules = super::anchored("Cargo registry", home.join(".cargo/registry"), &["cache"])?;
+    let start = RealFileSystem.directory_from_current(Some(&home))?;
+    let notifier = SilentNotifier::default();
+    Walker::new(RealFileSystem, rules, &notifier, options).walk_from_path(&start);
+
+    let found: Vec<_> = notifier
+        .to_remove
+        .into_inner()
+        .expect("notifier lock")
+        .into_iter()
+        .filter_map(|candidate| match candidate.action {
+            RemovalAction::Delete { file_info, .. } => Some(file_info.path),
+            RemovalAction::RunCommand { .. } => None,
+        })
+        .collect();
+
+    assert_eq!(vec![real.join("cache")], found);
     Ok(())
 }
 
@@ -351,7 +493,7 @@ fn a_moved_cache_is_reclaimed_where_it_now_lives() -> eyre::Result<()> {
 /// not be turned into one that would try.
 #[test]
 fn a_moved_cache_needs_a_parent_to_anchor_on() {
-    assert!(super::moved_cache_rule(Path::new("/")).is_none());
+    assert!(super::moved_cache_rule("Tool cache", Path::new("/")).is_none());
 }
 
 /// Every cache home in play has to be covered, or `--caches` finds nothing on a platform

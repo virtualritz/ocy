@@ -91,6 +91,13 @@ pub struct OcyOptions {
         help = "do not cross onto another filesystem"
     )]
     pub one_file_system: bool,
+
+    #[options(
+        no_short,
+        long = "no-follow-links",
+        help = "leave a cache that is a symlink alone instead of reclaiming what it points at"
+    )]
+    pub no_follow_links: bool,
 }
 
 impl OcyOptions {

@@ -271,25 +271,22 @@ fn cache_rules() -> Result<Vec<Rule>, RuleError> {
     let cargo = env_dir("CARGO_HOME").unwrap_or_else(|| home.join(".cargo"));
     let gradle = env_dir("GRADLE_USER_HOME").unwrap_or_else(|| home.join(".gradle"));
 
-    let mut rules = vec![
+    let mut rules = [
         // Downloaded crates and the sources unpacked from them. `index` is left alone:
         // it is small, and refetching it stalls the next build of every project at once.
-        Rule::remove_at("Cargo registry", cargo.join("registry"), &["cache", "src"])?,
+        anchored("Cargo registry", cargo.join("registry"), &["cache", "src"])?,
         // Bare clones of git dependencies and the working copies checked out from them.
-        Rule::remove_at("Cargo git", cargo.join("git"), &["checkouts", "db"])?,
+        anchored("Cargo git", cargo.join("git"), &["checkouts", "db"])?,
         // Gradle's own `wrapper` directory is left alone: it holds the Gradle
         // distributions themselves, which is an installation rather than a cache.
-        Rule::remove_at("Gradle cache", gradle, &["caches", "daemon"])?,
-        Rule::remove_at("Tool cache", home.clone(), HOME_ENTRIES)?,
-        apt_cache_rule(PathBuf::from(APT_CACHE))?,
-    ];
+        anchored("Gradle cache", gradle, &["caches", "daemon"])?,
+        anchored("Tool cache", home.clone(), HOME_ENTRIES)?,
+        vec![apt_cache_rule(PathBuf::from(APT_CACHE))?],
+    ]
+    .concat();
 
     for cache_home in cache_homes(&home) {
-        rules.push(Rule::remove_at(
-            "Tool cache",
-            cache_home,
-            CACHE_HOME_ENTRIES,
-        )?);
+        rules.extend(anchored("Tool cache", cache_home, CACHE_HOME_ENTRIES)?);
     }
 
     for (variable, suffix) in MOVED_CACHES {
@@ -302,11 +299,14 @@ fn cache_rules() -> Result<Vec<Rule>, RuleError> {
             moved.join(suffix)
         };
 
-        match moved_cache_rule(&moved) {
+        match moved_cache_rule("Tool cache", &moved) {
             Some(rule) => rules.push(rule?),
             // A variable naming a filesystem root, or a path that is not valid UTF-8,
             // leaves nothing a rule could reclaim.
             None => log::warn!("ignoring {variable}: {} names no cache", moved.display()),
+        }
+        if let Some(rule) = linked_cache_rule("Tool cache", &moved) {
+            rules.push(rule?);
         }
     }
 
@@ -332,11 +332,71 @@ fn cache_homes(home: &Path) -> Vec<PathBuf> {
 /// [`Rule::remove_at`] reclaims entries *inside* its anchor, so a cache that has been
 /// moved somewhere of its own -- with no sibling worth naming -- is expressed by
 /// anchoring one level up. Returns [`None`] for a path with no parent or no name.
-fn moved_cache_rule(path: &Path) -> Option<Result<Rule, RuleError>> {
+fn moved_cache_rule(rule: &str, path: &Path) -> Option<Result<Rule, RuleError>> {
     let parent = path.parent()?;
     let name = path.file_name()?.to_str()?;
 
-    Some(Rule::remove_at("Tool cache", parent.to_path_buf(), &[name]))
+    Some(Rule::remove_at(rule, parent.to_path_buf(), &[name]))
+}
+
+/// Rules reclaiming `entries` under `anchor`, and wherever a symlink has put one of them.
+///
+/// A cache is often a link to a roomier disk -- `~/.cache/sccache` pointing into `/work`.
+/// A scan that reaches the real directory directly has to know it by its real path, so
+/// the directory each entry resolves to is named on its own.
+///
+/// The anchor itself may sit behind a link too -- `~/.cargo/registry` is as easily moved
+/// as the cache inside it. The walk does not enter links, so such an anchor is never
+/// reached; the rule is restated from just outside the link, where following it is left
+/// to the walk.
+fn anchored(rule: &str, anchor: PathBuf, entries: &[&str]) -> Result<Vec<Rule>, RuleError> {
+    let mut rules = entries
+        .iter()
+        .filter_map(|entry| linked_cache_rule(rule, &anchor.join(entry)))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if let Some(outside) = outside_link(rule, &anchor, entries) {
+        rules.push(outside?);
+    }
+
+    rules.insert(0, Rule::remove_at(rule, anchor, entries)?);
+    Ok(rules)
+}
+
+/// `entries` of `anchor` restated from the directory holding its outermost symlinked
+/// ancestor, or [`None`] when no ancestor is a link.
+fn outside_link(rule: &str, anchor: &Path, entries: &[&str]) -> Option<Result<Rule, RuleError>> {
+    let link = anchor
+        .ancestors()
+        .filter(|ancestor| {
+            ancestor
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_symlink())
+        })
+        .last()?;
+    let parent = link.parent()?;
+    let prefix = anchor.strip_prefix(parent).ok()?;
+
+    let targets = entries
+        .iter()
+        .map(|entry| prefix.join(entry).to_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
+
+    Some(Rule::remove_at(rule, parent.to_path_buf(), &targets))
+}
+
+/// A rule reclaiming the directory `path` resolves to, when that is somewhere else.
+///
+/// Returns [`None`] when `path` does not exist, resolves to itself, or is not a directory.
+fn linked_cache_rule(rule: &str, path: &Path) -> Option<Result<Rule, RuleError>> {
+    let real = path.canonicalize().ok()?;
+
+    if real == path || !real.is_dir() {
+        None
+    } else {
+        moved_cache_rule(rule, &real)
+    }
 }
 
 /// A directory named by an environment variable, treating an empty setting as unset.

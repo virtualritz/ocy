@@ -69,6 +69,15 @@ pub struct WalkOptions {
 
     /// Do not cross onto another filesystem, so a scan cannot wander onto network mounts.
     pub one_file_system: bool,
+
+    /// Reclaim the directory a cache symlink points at, rather than passing the link by.
+    ///
+    /// Only an anchored rule follows links. A shared cache is routinely linked onto a
+    /// roomier disk, and the link is the only place a scan of the home directory meets
+    /// it. A link inside a project is another matter: a `node_modules` linked to a
+    /// sibling checkout is that checkout's, and reclaiming through it would reach out of
+    /// the project into something that was never its build output.
+    pub follow_links: bool,
 }
 
 /// Tracks paths already claimed by a rule, so nested candidates are not walked or re-reported.
@@ -300,9 +309,11 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
         entries: &[FileInfo],
         targets: &[Target],
     ) -> HashSet<PathBuf> {
+        let follow_links = self.options.follow_links && rule.anchor().is_some();
+
         targets
             .iter()
-            .flat_map(|target| self.resolve_target(entries, target))
+            .flat_map(|target| self.resolve_target(entries, target, follow_links))
             .filter_map(|found| {
                 let path = found.path.clone();
                 self.claim(rule, found).then_some(path)
@@ -315,29 +326,92 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
     /// The first component is matched against the already-listed entries, so the common
     /// single-component target costs no extra syscall; only a nested target such as
     /// `.angular/cache` reads further directories.
-    fn resolve_target(&self, entries: &[FileInfo], target: &Target) -> Vec<FileInfo> {
+    fn resolve_target(
+        &self,
+        entries: &[FileInfo],
+        target: &Target,
+        follow_links: bool,
+    ) -> Vec<FileInfo> {
         let Some((first, rest)) = target.components.split_first() else {
             return Vec::new();
         };
 
-        let mut found: Vec<FileInfo> = entries
-            .iter()
-            .filter(|entry| first.matches(&entry.name))
-            .cloned()
-            .collect();
+        // A link can stand at any level: `~/.npm` is as likely to be one as
+        // `~/.npm/_cacache`, and a link that is not followed stops the target short.
+        // One that cannot be followed stays the link it is, for a target to take or not.
+        let follow = |found: Vec<FileInfo>| -> Vec<FileInfo> {
+            if follow_links {
+                found
+                    .into_iter()
+                    .map(|entry| match entry.kind {
+                        SimpleFileKind::Symlink => self.follow_link(&entry).unwrap_or(entry),
+                        _ => entry,
+                    })
+                    .collect()
+            } else {
+                found
+            }
+        };
+
+        let mut found = follow(
+            entries
+                .iter()
+                .filter(|entry| first.matches(&entry.name))
+                .cloned()
+                .collect(),
+        );
 
         for component in rest {
-            found = found
-                .iter()
-                .filter(|entry| entry.kind == SimpleFileKind::Directory)
-                .filter_map(|dir| self.fs.list_files(dir).ok())
-                .flat_map(|listing| listing.entries)
-                .filter(|entry| component.matches(&entry.name))
-                .collect();
+            found = follow(
+                found
+                    .iter()
+                    .filter(|entry| entry.kind == SimpleFileKind::Directory)
+                    .filter_map(|dir| self.fs.list_files(dir).ok())
+                    .flat_map(|listing| listing.entries)
+                    .filter(|entry| component.matches(&entry.name))
+                    .collect(),
+            );
         }
 
         found.retain(|entry| target.kind.is_none_or(|kind| kind == entry.kind));
         found
+    }
+
+    /// The directory `link` points at, if the scan may reclaim it.
+    ///
+    /// The target lies outside anything the walk has vetted, so it is held to what the
+    /// walk would have required on the way there: nothing under an ignored directory --
+    /// which includes the user's XDG state -- and nothing on another filesystem when
+    /// asked to stay on one.
+    fn follow_link(&self, link: &FileInfo) -> Option<FileInfo> {
+        let real = self.fs.resolve_link(link)?;
+
+        if real
+            .path
+            .ancestors()
+            .any(|ancestor| self.is_ignored(ancestor))
+        {
+            log::debug!(
+                "not following {}: {} is ignored",
+                link.path.display(),
+                real.path.display()
+            );
+            None
+        } else if !self.stays_on_one_filesystem(&real) {
+            log::debug!(
+                "not following {}: {} is on another filesystem",
+                link.path.display(),
+                real.path.display()
+            );
+            None
+        } else {
+            log::debug!(
+                "following {} to {}",
+                link.path.display(),
+                real.path.display()
+            );
+            Some(real)
+        }
     }
 
     /// Report the records of worktrees whose checkout is gone.

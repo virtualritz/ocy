@@ -60,6 +60,7 @@ fn run(options: &OcyOptions) -> Result<ExitCode> {
         scanned_hidden: scanned_hidden(&rules),
         max_depth: options.max_depth,
         one_file_system: options.one_file_system,
+        follow_links: !options.no_follow_links,
     };
 
     if walk_options.one_file_system && RealFileSystem.device_id(&current_directory).is_none() {
