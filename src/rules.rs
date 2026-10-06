@@ -434,20 +434,19 @@ pub fn rule_name_matches(rule_name: &str, requested: &str) -> bool {
     rule_name.eq_ignore_ascii_case(requested)
 }
 
-/// The user's live XDG state, kept out of every rule regardless of `--all`.
+/// Hidden application state under the user's home, kept out of every rule regardless of
+/// `--all`.
 ///
-/// `XDG_CONFIG_HOME` (default `~/.config`), `XDG_DATA_HOME` (default `~/.local/share`)
-/// and `XDG_STATE_HOME` (default `~/.local/state`) hold every installed application's
-/// own settings and data, not build output. An app that happens to bundle a
+/// Hidden home directories hold installed applications' own settings and data, not build
+/// output. An app that happens to bundle a
 /// `package.json` beside a `node_modules` -- Discord's own native modules do -- looks
 /// exactly like a project to the ordinary rules once `--all` lets the walk reach it, and
 /// reclaiming its `node_modules` breaks the installed program rather than freeing
 /// anything disposable.
 ///
-/// Resolved from the environment rather than matched by name, so a variable pointed
-/// somewhere unusual is still covered: naming `.config` the way [`SCANNED_HIDDEN_DIRS`]
-/// names directories would miss that, and would also catch an unrelated directory that
-/// happens to share the name deep inside some project.
+/// Cache roots are deliberately excluded here because their contents are handled by the
+/// explicit `--caches` rules. This makes unknown application directories safe without
+/// requiring a growing list of tool names.
 ///
 /// A location that fails to canonicalize -- nothing has created it yet -- is simply
 /// left out: there is nothing under it to protect.
@@ -457,14 +456,41 @@ pub fn protected_state_dirs() -> Vec<PathBuf> {
         return Vec::new();
     };
 
-    [
-        env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
-        env_dir("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share")),
-        env_dir("XDG_STATE_HOME").unwrap_or_else(|| home.join(".local/state")),
-    ]
-    .into_iter()
-    .filter_map(|path| path.canonicalize().ok())
-    .collect()
+    let cache_roots = [
+        home.join(".cache"),
+        env_dir("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache")),
+        env_dir("CARGO_HOME").unwrap_or_else(|| home.join(".cargo")),
+        env_dir("GRADLE_USER_HOME").unwrap_or_else(|| home.join(".gradle")),
+        home.join(".local"),
+        home.join(".npm"),
+        home.join(".bun"),
+    ];
+
+    let mut protected = std::fs::read_dir(&home)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'))
+        })
+        .filter(|path| !cache_roots.iter().any(|root| path == root))
+        .filter_map(|path| path.canonicalize().ok())
+        .collect::<Vec<_>>();
+
+    protected.extend(
+        [
+            env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
+            env_dir("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share")),
+            env_dir("XDG_STATE_HOME").unwrap_or_else(|| home.join(".local/state")),
+        ]
+        .into_iter()
+        .filter_map(|path| path.canonicalize().ok()),
+    );
+    protected
 }
 
 /// The hidden directories a scan with these rules needs to enter.
