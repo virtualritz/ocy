@@ -268,9 +268,14 @@ Optional arguments:
 A path passed to `--ignore` takes its whole subtree with it: an application's own
 directory holds its data and its bundled dependencies the way a project holds its
 build output, so ignoring it has to cover every level below it. This is also how
-the hidden directories under `$HOME` are kept out of every scan, `--all`
-included -- a subdirectory of one stays protected whether the walk reaches it by
-descent or as the scan root itself.
+the hidden directories under `$HOME` are kept out of every scan, `--all` included.
+
+The exception is the directory the scan starts at. Naming a directory on the
+command line -- `ocy ~/.config/some-app`, or a checkout parked under a hidden
+directory -- is a request to look there, so an ignore covering the start
+directory is dropped for that run and ocy says so on stderr. Every other ignore
+stands, subtree included, so from a broader root the same directory stays
+protected.
 
 `--ignore` accepts both forms, and they compose:
 

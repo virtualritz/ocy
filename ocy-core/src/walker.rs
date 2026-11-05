@@ -56,8 +56,12 @@ pub struct WalkOptions {
     ///
     /// A subtree is what has to be protected: an application's own directory holds its
     /// data and its bundled dependencies the same way a project holds its build output,
-    /// so ignoring the directory has to cover every level below it. Protecting only the
-    /// named path would leave a scan pointed inside it free to reclaim what it finds.
+    /// so ignoring the directory has to cover every level below it.
+    ///
+    /// The one exception is the directory the walk starts at, or one of its ancestors:
+    /// naming a path on the command line is a request to look there, and the covering
+    /// entry would otherwise prune the walk before it read a single directory. See
+    /// [`WalkOptions::ignores_covering`].
     pub ignores: HashSet<PathBuf>,
 
     /// Descend into every hidden directory, not only [`WalkOptions::scanned_hidden`].
@@ -83,6 +87,42 @@ pub struct WalkOptions {
     /// sibling checkout is that checkout's, and reclaiming through it would reach out of
     /// the project into something that was never its build output.
     pub follow_links: bool,
+}
+
+impl WalkOptions {
+    /// The ignore entries covering the walk root: the ones that would otherwise prune it.
+    ///
+    /// An ignore keeps a broader scan out of a directory. When the walk starts inside a
+    /// protected one -- `ocy ~/.config/tools/project`, or a checkout parked under a
+    /// hidden application directory -- the directory was named explicitly, and the
+    /// covering entry has nothing left to protect: applied, it would prune the root and
+    /// report a clean tree without reading a single directory. Such entries are dropped
+    /// for that walk. Ignores for siblings, and for directories below the root, still
+    /// stand.
+    ///
+    /// `root` is canonicalized first because the start path arrives as typed -- relative,
+    /// through a symlink, or with `.` for the default -- while the ignores are already
+    /// canonical.
+    pub fn ignores_covering<'a>(&'a self, root: &Path) -> impl Iterator<Item = &'a Path> {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        self.ignores
+            .iter()
+            .map(PathBuf::as_path)
+            .filter(move |ignored| root.starts_with(*ignored))
+    }
+
+    /// The ignores that still apply to a walk starting at `root`.
+    ///
+    /// Entries reported by [`WalkOptions::ignores_covering`] are left out; every other
+    /// entry is kept.
+    pub fn ignores_below(&self, root: &Path) -> HashSet<PathBuf> {
+        let covering: HashSet<&Path> = self.ignores_covering(root).collect();
+        self.ignores
+            .iter()
+            .filter(|ignored| !covering.contains(ignored.as_path()))
+            .cloned()
+            .collect()
+    }
 }
 
 /// Tracks paths already claimed by a rule, so nested candidates are not walked or re-reported.
@@ -143,6 +183,11 @@ pub struct Walker<FS: FileSystem, N: WalkNotifier> {
     pruned: PrunedSet,
     /// Settled once before the walk starts, so the branches can read it without locking.
     root_device: OnceLock<Option<u64>>,
+    /// Ignores that apply to this walk, settled once for the same reason.
+    ///
+    /// The walk root's own protection is dropped here rather than in [`WalkOptions`], so
+    /// the caller cannot forget it: a root it names is a root it was asked to scan.
+    effective_ignores: OnceLock<HashSet<PathBuf>>,
     /// Directories already walked, so a worktree reached both by descent and by its git
     /// record is scanned once and counted once.
     visited: Mutex<HashSet<PathBuf>>,
@@ -178,6 +223,7 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
             options,
             pruned: PrunedSet::new(),
             root_device: OnceLock::new(),
+            effective_ignores: OnceLock::new(),
             visited: Mutex::default(),
             pending_worktrees: Mutex::default(),
             directories_scanned: AtomicUsize::new(0),
@@ -190,6 +236,10 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
             // Only ever set here, before any branch of the walk can read it.
             let _ = self.root_device.set(self.fs.device_id(path));
         }
+        // Same for the ignores: which ones apply depends on where the walk starts.
+        let _ = self
+            .effective_ignores
+            .set(self.options.ignores_below(&path.path));
 
         log::info!(
             "scanning {} with {} rules",
@@ -485,11 +535,15 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
     ///
     /// Checked against every ancestor rather than the path alone, so an ignored
     /// directory protects what is inside it even when the walk reaches that content
-    /// directly -- as a scan root, a linked worktree checkout, or a followed symlink --
-    /// without ever visiting the ignored directory itself.
+    /// directly -- as a linked worktree checkout or a followed symlink -- without ever
+    /// visiting the ignored directory itself. Entries covering the scan root are not
+    /// part of the set: see [`WalkOptions::ignores_covering`].
     fn is_ignored(&self, path: &Path) -> bool {
-        path.ancestors()
-            .any(|ancestor| self.options.ignores.contains(ancestor))
+        let ignores = self
+            .effective_ignores
+            .get()
+            .unwrap_or(&self.options.ignores);
+        path.ancestors().any(|ancestor| ignores.contains(ancestor))
     }
 
     fn is_walkable(&self, file: &FileInfo, depth: usize) -> bool {

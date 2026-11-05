@@ -451,6 +451,11 @@ pub fn rule_name_matches(rule_name: &str, requested: &str) -> bool {
 ///
 /// A location that fails to canonicalize -- nothing has created it yet -- is simply
 /// left out: there is nothing under it to protect.
+///
+/// This protects a broader scan. A scan rooted *inside* one of these directories was
+/// pointed there by name, and the walk drops ignores covering its root, so the requested
+/// tree is scanned instead of being pruned to nothing -- see
+/// [`ocy_core::walker::WalkOptions::ignores_covering`].
 pub fn protected_state_dirs() -> Vec<PathBuf> {
     let Some(home) = home_directory() else {
         log::warn!("cannot locate the home directory, so no XDG state is protected");

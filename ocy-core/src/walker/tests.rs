@@ -294,11 +294,12 @@ fn honours_ignores() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Ignoring a directory protects everything under it, even when the scan is pointed
-/// inside that directory. A walk root is never vetted by the descent that would normally
-/// have stopped at the ignored parent, so the check has to cover the whole subtree.
+/// A scan started inside an ignored directory was pointed there explicitly, so the
+/// covering ignore is dropped for that walk -- applied, it would prune the root before a
+/// single directory was read. Every other ignore still applies, so a broader scan keeps
+/// the same subtree off limits whether it reaches it by descent or as a linked worktree.
 #[test]
-fn an_ignored_directory_protects_a_project_beneath_it() -> eyre::Result<()> {
+fn a_scan_started_inside_an_ignored_directory_scans_it() -> eyre::Result<()> {
     let temp = tempfile::tempdir()?;
     let app = temp.path().join("app");
     let project = app.join("nested").join("project");
@@ -306,19 +307,24 @@ fn an_ignored_directory_protects_a_project_beneath_it() -> eyre::Result<()> {
     std::fs::write(project.join("Cargo.toml"), "")?;
 
     let rules = || vec![Rule::remove("Cargo", &["Cargo.toml"], &["target"]).expect("rule")];
-    let ignores = WalkOptions {
-        ignores: HashSet::from([app.canonicalize()?]),
+    let ignores = || WalkOptions {
+        ignores: HashSet::from([app.canonicalize().expect("canonical app")]),
         ..Default::default()
     };
 
     assert_eq!(
         vec!["target"],
-        reclaimed_on_disk(&project, rules(), WalkOptions::default()),
-        "the fixture should be reclaimable without the ignore"
+        reclaimed_on_disk(&project, rules(), ignores()),
+        "the requested root must not be pruned by the ignore covering it"
+    );
+    assert_eq!(
+        vec!["nested/project/target"],
+        reclaimed_on_disk(&app, rules(), ignores()),
+        "starting at the ignored directory itself is the same explicit request"
     );
     assert!(
-        reclaimed_on_disk(&project, rules(), ignores).is_empty(),
-        "an ignored directory must protect what is beneath it"
+        reclaimed_on_disk(temp.path(), rules(), ignores()).is_empty(),
+        "from a broader root the ignored directory must still protect what is beneath it"
     );
     Ok(())
 }

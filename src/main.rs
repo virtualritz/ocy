@@ -68,6 +68,8 @@ fn run(options: &OcyOptions) -> Result<ExitCode> {
         eyre::bail!("--one-file-system is not supported on this platform");
     }
 
+    note_protected_scan_root(options, &start_directory, &walk_options);
+
     let animated = progress_is_useful();
     let files = perform_walk(
         &current_directory,
@@ -123,6 +125,29 @@ fn rules_for_options(options: &OcyOptions) -> Result<Vec<Rule>> {
             .collect()
     };
     Ok(filtered_rules)
+}
+
+/// Say so when the requested root is one the scan would normally keep out of.
+///
+/// The walk drops an ignore that covers its root: a directory named on the command line
+/// is what was asked for, and leaving the ignore in force would prune the walk before it
+/// read anything, reporting a spotless tree that was never looked at. Stepping into what
+/// is normally off limits deserves one line of explanation rather than silence.
+fn note_protected_scan_root(
+    options: &OcyOptions,
+    start_directory: &FileInfo,
+    walk_options: &WalkOptions,
+) {
+    if options.quiet {
+        return;
+    }
+
+    for ignored in walk_options.ignores_covering(&start_directory.path) {
+        eprintln!(
+            "note: {} is protected; scanning it anyway",
+            ignored.display()
+        );
+    }
 }
 
 fn perform_walk(
