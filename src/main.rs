@@ -60,11 +60,9 @@ fn run(options: &OcyOptions) -> Result<ExitCode> {
         }
     };
 
-    let mut ignores = options.ignores_set()?;
-    ignores.extend(protected_state_dirs());
-
     let walk_options = WalkOptions {
-        ignores,
+        ignores: options.ignores_set()?,
+        protected: protected_state_dirs().into_iter().collect(),
         walk_all: options.walk_all,
         scanned_hidden: scanned_hidden(&rules),
         max_depth: options.max_depth,

@@ -64,6 +64,15 @@ pub struct WalkOptions {
     /// [`WalkOptions::ignores_covering`].
     pub ignores: HashSet<PathBuf>,
 
+    /// Absolute paths ocy itself keeps out of the scan, with the same subtree reach as
+    /// [`WalkOptions::ignores`] -- except for a linked git worktree checked out inside one.
+    ///
+    /// These are not the user's choice but ocy's guess that a hidden home directory holds
+    /// an application rather than a project. A checkout that git records as a linked
+    /// worktree settles that guess: it is a working copy wherever it is parked, and tools
+    /// routinely park them under `~/.config`.
+    pub protected: HashSet<PathBuf>,
+
     /// Descend into every hidden directory, not only [`WalkOptions::scanned_hidden`].
     pub walk_all: bool,
 
@@ -90,7 +99,8 @@ pub struct WalkOptions {
 }
 
 impl WalkOptions {
-    /// The ignore entries covering the walk root: the ones that would otherwise prune it.
+    /// The ignore and [`WalkOptions::protected`] entries covering the walk root: the
+    /// ones that would otherwise prune it.
     ///
     /// An ignore keeps a broader scan out of a directory. When the walk starts inside a
     /// protected one -- `ocy ~/.config/tools/project`, or a checkout parked under a
@@ -107,6 +117,7 @@ impl WalkOptions {
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         self.ignores
             .iter()
+            .chain(&self.protected)
             .map(PathBuf::as_path)
             .filter(move |ignored| root.starts_with(*ignored))
     }
@@ -116,10 +127,20 @@ impl WalkOptions {
     /// Entries reported by [`WalkOptions::ignores_covering`] are left out; every other
     /// entry is kept.
     pub fn ignores_below(&self, root: &Path) -> HashSet<PathBuf> {
+        self.not_covering(&self.ignores, root)
+    }
+
+    /// The protected directories that still apply to a walk starting at `root`, on the
+    /// same terms as [`WalkOptions::ignores_below`].
+    pub fn protected_below(&self, root: &Path) -> HashSet<PathBuf> {
+        self.not_covering(&self.protected, root)
+    }
+
+    fn not_covering(&self, entries: &HashSet<PathBuf>, root: &Path) -> HashSet<PathBuf> {
         let covering: HashSet<&Path> = self.ignores_covering(root).collect();
-        self.ignores
+        entries
             .iter()
-            .filter(|ignored| !covering.contains(ignored.as_path()))
+            .filter(|entry| !covering.contains(entry.as_path()))
             .cloned()
             .collect()
     }
@@ -188,11 +209,16 @@ pub struct Walker<FS: FileSystem, N: WalkNotifier> {
     /// The walk root's own protection is dropped here rather than in [`WalkOptions`], so
     /// the caller cannot forget it: a root it names is a root it was asked to scan.
     effective_ignores: OnceLock<HashSet<PathBuf>>,
+    /// Protected directories that apply to this walk, settled the same way.
+    effective_protected: OnceLock<HashSet<PathBuf>>,
     /// Directories already walked, so a worktree reached both by descent and by its git
     /// record is scanned once and counted once.
     visited: Mutex<HashSet<PathBuf>>,
     /// Checkouts of linked worktrees found during the walk, scanned once it finishes.
     pending_worktrees: Mutex<Vec<FileInfo>>,
+    /// Linked worktree checkouts found under a protected directory, which lift that
+    /// protection for their own subtree.
+    protected_worktrees: Mutex<HashSet<PathBuf>>,
     directories_scanned: AtomicUsize,
     candidates_found: AtomicUsize,
 }
@@ -224,8 +250,10 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
             pruned: PrunedSet::new(),
             root_device: OnceLock::new(),
             effective_ignores: OnceLock::new(),
+            effective_protected: OnceLock::new(),
             visited: Mutex::default(),
             pending_worktrees: Mutex::default(),
+            protected_worktrees: Mutex::default(),
             directories_scanned: AtomicUsize::new(0),
             candidates_found: AtomicUsize::new(0),
         }
@@ -236,10 +264,14 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
             // Only ever set here, before any branch of the walk can read it.
             let _ = self.root_device.set(self.fs.device_id(path));
         }
-        // Same for the ignores: which ones apply depends on where the walk starts.
+        // Same for the ignores and protected directories: which ones apply depends on
+        // where the walk starts.
         let _ = self
             .effective_ignores
             .set(self.options.ignores_below(&path.path));
+        let _ = self
+            .effective_protected
+            .set(self.options.protected_below(&path.path));
 
         log::info!(
             "scanning {} with {} rules",
@@ -289,6 +321,12 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
         if self.is_ignored(&file.path) || self.pruned.contains(&file.path) {
             return;
         }
+        if self.is_protected(&file.path) {
+            if !crate::git::is_linked_worktree(&file.path) {
+                return;
+            }
+            recover(self.protected_worktrees.lock()).insert(file.path.clone());
+        }
         if !recover(self.visited.lock()).insert(file.path.clone()) {
             return;
         }
@@ -317,6 +355,12 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
             .for_each(|report| self.notifier.notify_fail_to_scan(dir, report));
         let mut entries = listing.entries;
 
+        // Every rule wants a worktree's build output, so following worktrees cannot hang
+        // off the one rule that prunes their records: `--rule cargo` must reach them too.
+        if entries.iter().any(|entry| entry.name == ".git") {
+            self.queue_linked_worktrees(dir);
+        }
+
         for rule in &self.rules {
             if !rule.matches(&dir.path, &entries) {
                 continue;
@@ -343,10 +387,7 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
                             command.clone(),
                         ));
                 }
-                CleanAction::RemoveStaleWorktrees => {
-                    self.claim_stale_worktrees(rule, dir);
-                    self.queue_linked_worktrees(dir);
-                }
+                CleanAction::RemoveStaleWorktrees => self.claim_stale_worktrees(rule, dir),
             }
         }
 
@@ -441,7 +482,7 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
     fn follow_link(&self, link: &FileInfo) -> Option<FileInfo> {
         let real = self.fs.resolve_link(link)?;
 
-        if self.is_ignored(&real.path) {
+        if self.is_ignored(&real.path) || self.is_protected(&real.path) {
             log::debug!(
                 "not following {}: {} is ignored",
                 link.path.display(),
@@ -504,7 +545,10 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
     /// and recording what has been claimed are decided in one place instead of in each
     /// caller. Returns whether the claim was taken.
     fn claim(&self, rule: &Rule, file: FileInfo) -> bool {
-        if self.is_ignored(&file.path) || !self.pruned.claim(&file.path) {
+        if self.is_ignored(&file.path)
+            || self.is_protected(&file.path)
+            || !self.pruned.claim(&file.path)
+        {
             return false;
         }
 
@@ -544,6 +588,31 @@ impl<FS: FileSystem + Sync, N: WalkNotifier + Sync> Walker<FS, N> {
             .get()
             .unwrap_or(&self.options.ignores);
         path.ancestors().any(|ancestor| ignores.contains(ancestor))
+    }
+
+    /// Whether `path` lies under a protected directory, and not inside a linked worktree
+    /// checkout that is itself within the protection.
+    ///
+    /// Only ancestors up to the protected directory are searched for a worktree, so a
+    /// protected directory inside a worktree stays protected. Entries covering the scan
+    /// root are not part of the set, as for [`Walker::is_ignored`].
+    fn is_protected(&self, path: &Path) -> bool {
+        let protected = self
+            .effective_protected
+            .get()
+            .unwrap_or(&self.options.protected);
+        let Some(depth) = path
+            .ancestors()
+            .position(|ancestor| protected.contains(ancestor))
+        else {
+            return false;
+        };
+
+        let worktrees = recover(self.protected_worktrees.lock());
+        !path
+            .ancestors()
+            .take(depth + 1)
+            .any(|ancestor| worktrees.contains(ancestor))
     }
 
     fn is_walkable(&self, file: &FileInfo, depth: usize) -> bool {

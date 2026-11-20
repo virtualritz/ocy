@@ -50,6 +50,33 @@ pub fn linked_worktree_paths(git_dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether `checkout` is a linked worktree that its repository records as one.
+///
+/// The `.git` file in a checkout names its record, and the record's [`GITDIR_POINTER`]
+/// names that `.git` file back. One pointer alone is a line anything could write; the
+/// round trip is what `git worktree add` leaves. Either may be relative: the first to the
+/// checkout, the second to the record.
+pub fn is_linked_worktree(checkout: &Path) -> bool {
+    let git_file = checkout.join(".git");
+    let Some(record) = fs::read_to_string(&git_file)
+        .ok()
+        .and_then(|contents| Some(checkout.join(contents.strip_prefix("gitdir:")?.trim())))
+    else {
+        return false;
+    };
+
+    let Ok(pointer) = fs::read_to_string(record.join(GITDIR_POINTER)) else {
+        return false;
+    };
+    match (
+        record.join(pointer.trim()).canonicalize(),
+        git_file.canonicalize(),
+    ) {
+        (Ok(back), Ok(git_file)) => back == git_file,
+        _ => false,
+    }
+}
+
 fn checkout_path(record: &Path) -> Option<PathBuf> {
     let pointer = fs::read_to_string(record.join(GITDIR_POINTER)).ok()?;
     let git_file = Path::new(pointer.trim());

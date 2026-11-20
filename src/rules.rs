@@ -685,11 +685,14 @@ pub fn select_rules(
 /// explicit `--caches` rules. This makes unknown application directories safe without
 /// requiring a growing list of tool names.
 ///
+/// A linked git worktree checked out under one of these is a project all the same, and
+/// the walk reclaims its build output; see `WalkOptions::protected`.
+///
 /// A location that fails to canonicalize -- nothing has created it yet -- is simply
 /// left out: there is nothing under it to protect.
 ///
 /// This protects a broader scan. A scan rooted *inside* one of these directories was
-/// pointed there by name, and the walk drops ignores covering its root, so the requested
+/// pointed there by name, and the walk drops protection covering its root, so the requested
 /// tree is scanned instead of being pruned to nothing -- see
 /// [`ocy_core::walker::WalkOptions::ignores_covering`].
 pub fn protected_state_dirs() -> Vec<PathBuf> {

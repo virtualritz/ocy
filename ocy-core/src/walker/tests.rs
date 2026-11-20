@@ -657,3 +657,130 @@ fn honours_ignores_for_a_stale_worktree_record() -> eyre::Result<()> {
     assert!(found.is_empty(), "claimed an ignored record: {found:?}");
     Ok(())
 }
+
+/// Following worktrees is not the job of the rule that prunes their records: a scan
+/// limited to `cargo` has to reach a hidden worktree's `target` all the same.
+#[test]
+fn follows_a_linked_worktree_without_the_worktree_rule() -> eyre::Result<()> {
+    let temp = tempfile::tempdir()?;
+    repo_with_hidden_worktree(temp.path())?;
+
+    let found = reclaimed_on_disk(temp.path(), cargo_rule(), WalkOptions::default());
+
+    assert_eq!(
+        vec!["repo/.claude/worktrees/feat/target", "repo/target"],
+        found
+    );
+    Ok(())
+}
+
+/// Build a repository whose linked worktree is parked under `state/`, the way tools park
+/// worktrees under `~/.config`, with both pointers git writes. Beside it, `state/app` looks
+/// like a project but is application state. Returns `state/` and the checkout.
+fn repo_with_parked_worktree(
+    root: &std::path::Path,
+) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let repo = root.join("repo");
+    let state = root.join("state");
+    let worktree = state.join("tool").join("worktrees").join("feat");
+    let record = repo.join(".git").join("worktrees").join("feat");
+    for project in [&repo, &worktree, &state.join("app")] {
+        std::fs::create_dir_all(project.join("target"))?;
+        std::fs::write(project.join("Cargo.toml"), "")?;
+    }
+    std::fs::create_dir_all(&record)?;
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", record.display()),
+    )?;
+    std::fs::write(
+        record.join("gitdir"),
+        format!("{}\n", worktree.join(".git").display()),
+    )?;
+    Ok((state, worktree))
+}
+
+fn protecting(path: &std::path::Path) -> eyre::Result<WalkOptions> {
+    Ok(WalkOptions {
+        protected: HashSet::from([path.canonicalize()?]),
+        walk_all: true,
+        ..Default::default()
+    })
+}
+
+/// A worktree parked under protected application state is still a working copy, so its
+/// build output is reclaimed -- while the application beside it stays protected.
+#[test]
+fn protection_spares_a_linked_worktree_parked_inside_it() -> eyre::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (state, _) = repo_with_parked_worktree(temp.path())?;
+
+    let found = reclaimed_on_disk(temp.path(), cargo_rule(), protecting(&state)?);
+
+    assert_eq!(
+        vec!["repo/target", "state/tool/worktrees/feat/target"],
+        found
+    );
+    Ok(())
+}
+
+/// Scanning a parked worktree directly reclaims its build output too.
+#[test]
+fn protection_spares_a_linked_worktree_scanned_directly() -> eyre::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (state, worktree) = repo_with_parked_worktree(temp.path())?;
+
+    let found = reclaimed_on_disk(&worktree, cargo_rule(), protecting(&state)?);
+
+    assert_eq!(vec!["target"], found);
+    Ok(())
+}
+
+/// The scan root's exception covers ocy's own protection as much as an ignore: a
+/// protected directory named on the command line is scanned, worktree or not, while a
+/// broader scan still leaves it alone.
+#[test]
+fn a_scan_started_inside_a_protected_directory_scans_it() -> eyre::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (state, _) = repo_with_parked_worktree(temp.path())?;
+
+    let found = reclaimed_on_disk(&state.join("app"), cargo_rule(), protecting(&state)?);
+
+    assert_eq!(vec!["target"], found);
+    Ok(())
+}
+
+/// A `.git` file alone is something any directory can carry. Without the record pointing
+/// back, the checkout is not a verified worktree and protection holds.
+#[test]
+fn protection_holds_for_a_one_way_worktree_pointer() -> eyre::Result<()> {
+    let temp = tempfile::tempdir()?;
+    repo_with_hidden_worktree(temp.path())?;
+
+    let found = reclaimed_on_disk(
+        temp.path(),
+        cargo_rule(),
+        protecting(&temp.path().join("repo").join(".claude"))?,
+    );
+
+    assert_eq!(vec!["repo/target"], found);
+    Ok(())
+}
+
+/// The worktree exemption is for ocy's own guess only. A path the user ignored stays
+/// ignored, verified worktree or not.
+#[test]
+fn an_ignore_holds_for_a_verified_worktree() -> eyre::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (state, _) = repo_with_parked_worktree(temp.path())?;
+
+    let options = WalkOptions {
+        ignores: HashSet::from([state.canonicalize()?]),
+        walk_all: true,
+        ..Default::default()
+    };
+    let found = reclaimed_on_disk(temp.path(), cargo_rule(), options);
+
+    assert_eq!(vec!["repo/target"], found);
+    Ok(())
+}

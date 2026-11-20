@@ -249,8 +249,9 @@ whichever convention was not guessed.
 
 `ocy` does not guess. On reaching a repository it reads `.git/worktrees/*/gitdir`
 and follows each record to its checkout, wherever that is and whatever it is
-called. A worktree reached both by ordinary descent and by its record is scanned
-once, so its bytes are not counted twice.
+called. This happens whichever rules are selected, so `-r cargo` reaches a
+worktree's `target` too. A worktree reached both by ordinary descent and by its
+record is scanned once, so its bytes are not counted twice.
 
 Only checkouts *below the directory being scanned* are followed. A worktree
 parked in `/tmp` is outside what you asked `ocy` to clean, so it is skipped and
@@ -315,15 +316,22 @@ Optional arguments:
 
 A path passed to `--ignore` takes its whole subtree with it: an application's own
 directory holds its data and its bundled dependencies the way a project holds its
-build output, so ignoring it has to cover every level below it. This is also how
-the hidden directories under `$HOME` are kept out of every scan, `--all` included.
+build output, so ignoring it has to cover every level below it. The hidden
+directories under `$HOME` are kept out of every scan the same way, `--all`
+included.
 
-The exception is the directory the scan starts at. Naming a directory on the
-command line -- `ocy ~/.config/some-app`, or a checkout parked under a hidden
-directory -- is a request to look there, so an ignore covering the start
-directory is dropped for that run and ocy says so on stderr. Every other ignore
+There are two exceptions. The first is the directory the scan starts at. Naming
+a directory on the command line -- `ocy ~/.config/some-app` -- is a request to
+look there, so an ignore or a hidden-directory protection covering the start
+directory is dropped for that run and ocy says so on stderr. Every other one
 stands, subtree included, so from a broader root the same directory stays
 protected.
+
+The second is a linked git worktree checked out inside a protected hidden
+directory, as tools that park worktrees under `~/.config` do: its `.git` file
+and its repository's record point at each other, so it is a working copy, not
+application state, and its build output is reclaimed from a broader root too. A
+path you pass to `--ignore` has no such exception.
 
 `--ignore` accepts both forms, and they compose:
 
