@@ -20,16 +20,106 @@ pub const SCANNED_HIDDEN_DIRS: &[&str] = &[
     ".worktrees",
 ];
 
-/// The built-in rule set.
+/// The canonical name of every built-in rule.
 ///
-/// Command rules are gated behind `allow_commands`: a rule such as `make clean` runs a
-/// script the scanned directory controls, so enabling it for an ordinary scan would
-/// execute arbitrary code from any tree that happens to contain a `Makefile`.
+/// A name is a single token -- lowercase, digits and hyphens -- because it is also the
+/// value typed after `-r`, where anything containing a space would need quoting and could
+/// not be chained with a comma.
+mod names {
+    pub const CARGO: &str = "cargo";
+    pub const GRADLE: &str = "gradle";
+    pub const MAVEN: &str = "maven";
+    pub const SBT: &str = "sbt";
+    pub const NODEJS: &str = "nodejs";
+    pub const ANGULAR: &str = "angular";
+    pub const PYTHON_VENV: &str = "python-venv";
+    pub const PYTHON: &str = "python";
+    pub const DOTNET: &str = "dotnet";
+    pub const CMAKE: &str = "cmake";
+    pub const ZIG: &str = "zig";
+    pub const SWIFTPM: &str = "swiftpm";
+    pub const XCODE: &str = "xcode";
+    pub const ELIXIR: &str = "elixir";
+    pub const CABAL: &str = "cabal";
+    pub const STACK: &str = "stack";
+    pub const FLUTTER: &str = "flutter";
+    pub const UNITY: &str = "unity";
+    pub const TRUNK: &str = "trunk";
+    pub const TERRAFORM: &str = "terraform";
+    pub const COMPOSER: &str = "composer";
+    pub const GIT_WORKTREE: &str = "git-worktree";
+    pub const MAKE: &str = "make";
+
+    pub const CARGO_REGISTRY: &str = "cargo-registry";
+    pub const CARGO_GIT: &str = "cargo-git";
+    pub const GRADLE_CACHE: &str = "gradle-cache";
+    pub const TOOL_CACHES: &str = "tool-caches";
+    pub const APT_CACHE: &str = "apt-cache";
+}
+use names::*;
+
+/// Every canonical rule name, in the order the [`standard_rules`] catalog builds them.
 ///
-/// Shared tool caches are gated behind `clean_caches`, for a different reason: they are
-/// not project output. One belongs to every project on the machine at once, so a scan of
-/// one directory reclaiming it would reach far outside what was asked for.
-pub fn standard_rules(allow_commands: bool, clean_caches: bool) -> Result<Vec<Rule>, RuleError> {
+/// Kept as data rather than derived from the catalog so that a selector can be validated,
+/// and a typo corrected, without building every rule first. A test holds the two in step.
+const ALL_RULE_NAMES: &[&str] = &[
+    CARGO,
+    GRADLE,
+    MAVEN,
+    SBT,
+    NODEJS,
+    ANGULAR,
+    PYTHON_VENV,
+    PYTHON,
+    DOTNET,
+    CMAKE,
+    ZIG,
+    SWIFTPM,
+    XCODE,
+    ELIXIR,
+    CABAL,
+    STACK,
+    FLUTTER,
+    UNITY,
+    TRUNK,
+    TERRAFORM,
+    COMPOSER,
+    GIT_WORKTREE,
+    MAKE,
+    CARGO_REGISTRY,
+    CARGO_GIT,
+    GRADLE_CACHE,
+    TOOL_CACHES,
+    APT_CACHE,
+];
+
+/// Rules that are not ordinary project output, and so are left out of a default scan.
+///
+/// Naming one of them is what opts in: `-r cargo-registry` reclaims exactly that, and
+/// `-r caches` selects the whole group.
+const CACHE_RULE_NAMES: &[&str] = &[
+    CARGO_REGISTRY,
+    CARGO_GIT,
+    GRADLE_CACHE,
+    TOOL_CACHES,
+    APT_CACHE,
+];
+
+/// Rules that run a command the scanned tree controls. Same opt-in rule as caches.
+const COMMAND_RULE_NAMES: &[&str] = &[MAKE];
+
+/// Groups a `-r` value may name instead of a single rule.
+const RULE_GROUPS: &[(&str, &[&str])] = &[
+    ("caches", CACHE_RULE_NAMES),
+    ("commands", COMMAND_RULE_NAMES),
+];
+
+/// The built-in rule catalog, gated rules included.
+///
+/// Returning everything is safe because nothing runs or reaches outside the scan until a
+/// rule is selected: [`select_rules`] holds back `make clean` and the shared caches unless
+/// they are asked for, either by name or through their group.
+pub fn standard_rules() -> Result<Vec<Rule>, RuleError> {
     // Alternative markers are separate rules, because a rule requires all of its markers.
     const PYTHON_CACHES: &[&str] = &[
         ".pytest_cache",
@@ -47,15 +137,15 @@ pub fn standard_rules(allow_commands: bool, clean_caches: bool) -> Result<Vec<Ru
         // Rust. The second rule is what finds a target directory that `CARGO_TARGET_DIR`
         // has renamed or moved away from beside its manifest: cargo stamps every one it
         // creates with both of these, so the directory identifies itself.
-        Rule::remove("Cargo", &["Cargo.toml"], &["target"])?,
-        Rule::remove_self("Cargo", &["CACHEDIR.TAG", ".rustc_info.json"])?,
+        Rule::remove(CARGO, &["Cargo.toml"], &["target"])?,
+        Rule::remove_self(CARGO, &["CACHEDIR.TAG", ".rustc_info.json"])?,
         // JVM. The glob covers both the Groovy and Kotlin build scripts.
-        Rule::remove("Gradle", &["build.gradle*"], &["build", ".gradle"])?,
-        Rule::remove("Maven", &["pom.xml"], &["target"])?,
-        Rule::remove("SBT", &["build.sbt"], &["target", "project/target"])?,
+        Rule::remove(GRADLE, &["build.gradle*"], &["build", ".gradle"])?,
+        Rule::remove(MAVEN, &["pom.xml"], &["target"])?,
+        Rule::remove(SBT, &["build.sbt"], &["target", "project/target"])?,
         // JavaScript and TypeScript.
         Rule::remove(
-            "NodeJS",
+            NODEJS,
             &["package.json"],
             &[
                 "node_modules",
@@ -69,75 +159,56 @@ pub fn standard_rules(allow_commands: bool, clean_caches: bool) -> Result<Vec<Ru
                 ".npm-cache",
             ],
         )?,
-        Rule::remove("Angular", &["angular.json"], &[".angular/cache"])?,
+        Rule::remove(ANGULAR, &["angular.json"], &[".angular/cache"])?,
         // Python. A virtual environment is identified by the `pyvenv.cfg` it contains,
         // which is why it needs a self-marked rule rather than a sibling one.
-        Rule::remove_self("Python venv", &["pyvenv.cfg"])?,
-        Rule::remove("Python", &["*.py"], &["__pycache__"])?,
-        Rule::remove("Python", &["pyproject.toml"], PYTHON_CACHES)?,
-        Rule::remove("Python", &["setup.py"], PYTHON_CACHES)?,
+        Rule::remove_self(PYTHON_VENV, &["pyvenv.cfg"])?,
+        Rule::remove(PYTHON, &["*.py"], &["__pycache__"])?,
+        Rule::remove(PYTHON, &["pyproject.toml"], PYTHON_CACHES)?,
+        Rule::remove(PYTHON, &["setup.py"], PYTHON_CACHES)?,
         // .NET.
-        Rule::remove(".NET", &["*.csproj"], DOTNET_OUTPUT)?,
-        Rule::remove(".NET", &["*.fsproj"], DOTNET_OUTPUT)?,
+        Rule::remove(DOTNET, &["*.csproj"], DOTNET_OUTPUT)?,
+        Rule::remove(DOTNET, &["*.fsproj"], DOTNET_OUTPUT)?,
         // C and C++. A CMake build directory may be called anything -- `build`,
         // `build_debug`, `Linux-x86_64-optimize` -- and is as often a sibling of the
         // source as a child of it, so the sibling rule alone misses most of them.
         // `CMakeCache.txt` is written into the build directory itself, which makes the
         // directory self-marked whatever it was named.
-        Rule::remove(
-            "CMake",
-            &["CMakeLists.txt"],
-            &["cmake-build-*", "CMakeFiles"],
-        )?,
-        Rule::remove_self("CMake", &["CMakeCache.txt"])?,
+        Rule::remove(CMAKE, &["CMakeLists.txt"], &["cmake-build-*", "CMakeFiles"])?,
+        Rule::remove_self(CMAKE, &["CMakeCache.txt"])?,
         // Zig.
-        Rule::remove(
-            "Zig",
-            &["build.zig"],
-            &[".zig-cache", "zig-cache", "zig-out"],
-        )?,
+        Rule::remove(ZIG, &["build.zig"], &[".zig-cache", "zig-cache", "zig-out"])?,
         // Swift and Objective-C.
-        Rule::remove("SwiftPM", &["Package.swift"], &[".build"])?,
-        Rule::remove("XCode", &["*.xcodeproj"], &["DerivedData"])?,
+        Rule::remove(SWIFTPM, &["Package.swift"], &[".build"])?,
+        Rule::remove(XCODE, &["*.xcodeproj"], &["DerivedData"])?,
         // Elixir.
-        Rule::remove("Elixir", &["mix.exs"], &["_build", "deps"])?,
+        Rule::remove(ELIXIR, &["mix.exs"], &["_build", "deps"])?,
         // Haskell.
-        Rule::remove("Cabal", &["*.cabal"], &["dist-newstyle"])?,
-        Rule::remove("Stack", &["stack.yaml"], &[".stack-work"])?,
+        Rule::remove(CABAL, &["*.cabal"], &["dist-newstyle"])?,
+        Rule::remove(STACK, &["stack.yaml"], &[".stack-work"])?,
         // Dart and Flutter.
-        Rule::remove("Flutter/Dart", &["pubspec.yaml"], &["build", ".dart_tool"])?,
+        Rule::remove(FLUTTER, &["pubspec.yaml"], &["build", ".dart_tool"])?,
         // Unity, which needs both markers to avoid matching any directory named `Assets`.
         Rule::remove(
-            "Unity",
+            UNITY,
             &["Assets", "ProjectSettings"],
             &["Library", "Temp", "Obj", "Logs"],
         )?,
         // WebAssembly. Keyed on `Trunk.toml` rather than on the manifest beside it: a
         // `dist` next to a `Cargo.toml` is as likely to be something the project keeps.
-        Rule::remove("Trunk", &["Trunk.toml"], &["dist"])?,
+        Rule::remove(TRUNK, &["Trunk.toml"], &["dist"])?,
         // Infrastructure.
-        Rule::remove("Terraform", &["*.tf"], &[".terraform"])?,
+        Rule::remove(TERRAFORM, &["*.tf"], &[".terraform"])?,
         // PHP.
-        Rule::remove("Composer", &["composer.json"], &["vendor"])?,
+        Rule::remove(COMPOSER, &["composer.json"], &["vendor"])?,
         // Git worktree records left behind by a deleted checkout.
-        Rule::prune_stale_worktrees("Git worktree", &[".git"])?,
+        Rule::prune_stale_worktrees(GIT_WORKTREE, &[".git"])?,
     ];
-
-    let command_rules = allow_commands
-        .then(|| Rule::run("Make", &["Makefile"], "make clean"))
-        .transpose()?
-        .into_iter();
-
-    let cache_rules = if clean_caches {
-        cache_rules()?
-    } else {
-        Vec::new()
-    };
 
     Ok(rules
         .into_iter()
-        .chain(command_rules)
-        .chain(cache_rules)
+        .chain([Rule::run(MAKE, &["Makefile"], "make clean")?])
+        .chain(cache_rules()?)
         .collect())
 }
 
@@ -214,9 +285,9 @@ const MOVED_CACHES: &[(&str, &str)] = &[
 /// are not read from config files: `Dir::Cache` is almost never moved, and a parser for
 /// apt's config format would be a lot of code to be wrong in for that case. Like every
 /// anchored path, it simply never matches on a system without apt.
-const APT_CACHE: &str = "/var/cache/apt";
+const APT_CACHE_DIR: &str = "/var/cache/apt";
 
-/// What `apt-get clean` removes, relative to [`APT_CACHE`].
+/// What `apt-get clean` removes, relative to [`APT_CACHE_DIR`].
 ///
 /// Every downloaded package, anything a download left half-finished, and the two binary
 /// caches apt rebuilds from its package lists on its next run. The `archives/lock` file
@@ -231,7 +302,7 @@ const APT_CACHE_PARTIAL: &str = "archives/partial/*";
 /// The cache belongs to root, so only a scan run as root can actually remove anything;
 /// any other scan still reports what is there, and each removal then fails on its own.
 fn apt_cache_rule(anchor: PathBuf) -> Result<Rule, RuleError> {
-    const NAME: &str = "APT cache";
+    const NAME: &str = names::APT_CACHE;
     let invalid = |pattern: &str| {
         let pattern = pattern.to_string();
         move |source| RuleError::InvalidPattern {
@@ -274,19 +345,19 @@ fn cache_rules() -> Result<Vec<Rule>, RuleError> {
     let mut rules = [
         // Downloaded crates and the sources unpacked from them. `index` is left alone:
         // it is small, and refetching it stalls the next build of every project at once.
-        anchored("Cargo registry", cargo.join("registry"), &["cache", "src"])?,
+        anchored(CARGO_REGISTRY, cargo.join("registry"), &["cache", "src"])?,
         // Bare clones of git dependencies and the working copies checked out from them.
-        anchored("Cargo git", cargo.join("git"), &["checkouts", "db"])?,
+        anchored(CARGO_GIT, cargo.join("git"), &["checkouts", "db"])?,
         // Gradle's own `wrapper` directory is left alone: it holds the Gradle
         // distributions themselves, which is an installation rather than a cache.
-        anchored("Gradle cache", gradle, &["caches", "daemon"])?,
-        anchored("Tool cache", home.clone(), HOME_ENTRIES)?,
-        vec![apt_cache_rule(PathBuf::from(APT_CACHE))?],
+        anchored(GRADLE_CACHE, gradle, &["caches", "daemon"])?,
+        anchored(TOOL_CACHES, home.clone(), HOME_ENTRIES)?,
+        vec![apt_cache_rule(PathBuf::from(APT_CACHE_DIR))?],
     ]
     .concat();
 
     for cache_home in cache_homes(&home) {
-        rules.extend(anchored("Tool cache", cache_home, CACHE_HOME_ENTRIES)?);
+        rules.extend(anchored(TOOL_CACHES, cache_home, CACHE_HOME_ENTRIES)?);
     }
 
     for (variable, suffix) in MOVED_CACHES {
@@ -299,13 +370,13 @@ fn cache_rules() -> Result<Vec<Rule>, RuleError> {
             moved.join(suffix)
         };
 
-        match moved_cache_rule("Tool cache", &moved) {
+        match moved_cache_rule(TOOL_CACHES, &moved) {
             Some(rule) => rules.push(rule?),
             // A variable naming a filesystem root, or a path that is not valid UTF-8,
             // leaves nothing a rule could reclaim.
             None => log::warn!("ignoring {variable}: {} names no cache", moved.display()),
         }
-        if let Some(rule) = linked_cache_rule("Tool cache", &moved) {
+        if let Some(rule) = linked_cache_rule(TOOL_CACHES, &moved) {
             rules.push(rule?);
         }
     }
@@ -416,23 +487,188 @@ pub fn rule_names(rules: &[Rule]) -> HashSet<Arc<str>> {
     rules.iter().map(|rule| rule.name.clone()).collect()
 }
 
-/// A `--rule` value the rule itself is not named, matched ahead of the rule names.
-///
-/// `Cargo` is the build tool; `Rust` is the language someone scanning their own machine
-/// is more likely to type. `apt` is the command everyone knows the cache by.
-const RULE_SYNONYMS: &[(&str, &str)] = &[("rust", "Cargo"), ("apt", "APT cache")];
+/// Whether `name` is one of the shared-cache rules.
+pub fn is_cache_rule(name: &str) -> bool {
+    CACHE_RULE_NAMES.contains(&name)
+}
 
-/// Whether a `--rule` value selects `rule_name`.
+/// Whether `name` is one of the rules that run a project's own command.
+pub fn is_command_rule(name: &str) -> bool {
+    COMMAND_RULE_NAMES.contains(&name)
+}
+
+/// Spellings accepted for a rule whose canonical name is not what people type.
 ///
-/// Every rule name is matched case-insensitively -- `--rule Cargo`, `--rule cargo` and
-/// `--rule CARGO` all select the same rule -- and [`RULE_SYNONYMS`] is consulted first,
-/// so `--rule rust` selects `Cargo` as well.
-pub fn rule_name_matches(rule_name: &str, requested: &str) -> bool {
-    let requested = RULE_SYNONYMS
+/// Only names that [`normalize_rule_selector`] cannot bridge need an entry: `"Python
+/// venv"` already becomes `python-venv`, so only a genuinely different word -- `rust` for
+/// `cargo` -- is listed here.
+const RULE_ALIASES: &[(&str, &str)] = &[
+    ("rust", CARGO),
+    ("net", DOTNET),
+    ("node", NODEJS),
+    ("node-js", NODEJS),
+    ("apt", APT_CACHE),
+    ("tool-cache", TOOL_CACHES),
+    ("tools", TOOL_CACHES),
+    ("venv", PYTHON_VENV),
+    ("swift", SWIFTPM),
+    ("dart", FLUTTER),
+    ("flutter-dart", FLUTTER),
+    ("git-worktrees", GIT_WORKTREE),
+];
+
+/// Fold a `-r` value to the form canonical names are written in.
+///
+/// Case, surrounding whitespace and the separators names are commonly written with are
+/// all irrelevant: `"Tool cache"`, `"tool_caches"`, `"TOOL-CACHE"` and `"tool cache"`
+/// fold to `tool-cache`. The shell cannot protect a space inside an argv token, so
+/// accepting the spaced spelling when quoted costs nothing and keeps the pre-slug names
+/// working.
+fn normalize_rule_selector(selector: &str) -> String {
+    let mut normalized = String::with_capacity(selector.len());
+    let mut separator_pending = false;
+
+    for character in selector.trim().chars() {
+        if matches!(character, ' ' | '\t' | '.' | '/' | '_' | '-') {
+            separator_pending = !normalized.is_empty();
+        } else {
+            if separator_pending {
+                normalized.push('-');
+                separator_pending = false;
+            }
+            normalized.extend(character.to_lowercase());
+        }
+    }
+
+    normalized
+}
+
+/// The canonical name a folded selector names, if it is one rule.
+fn canonical_rule_name(normalized: &str) -> Option<&'static str> {
+    if let Some((_, canonical)) = RULE_ALIASES.iter().find(|(alias, _)| *alias == normalized) {
+        return Some(canonical);
+    }
+
+    ALL_RULE_NAMES
         .iter()
-        .find(|(synonym, _)| synonym.eq_ignore_ascii_case(requested))
-        .map_or(requested, |(_, canonical)| *canonical);
-    rule_name.eq_ignore_ascii_case(requested)
+        .copied()
+        .find(|name| *name == normalized)
+}
+
+/// Every rule a single `-r` value selects, or [`None`] when it names nothing.
+///
+/// A group name expands to the rules in it; a rule name selects just itself.
+pub fn expand_rule_selector(selector: &str) -> Option<Vec<&'static str>> {
+    let normalized = normalize_rule_selector(selector);
+
+    if let Some((_, group)) = RULE_GROUPS
+        .iter()
+        .find(|(name, _)| *name == normalized.as_str())
+    {
+        return Some((*group).to_vec());
+    }
+
+    canonical_rule_name(&normalized).map(|name| vec![name])
+}
+
+/// The selector closest to `selector`, when it is close enough to be a typo.
+pub fn suggest_rule_selector(selector: &str) -> Option<&'static str> {
+    let normalized = normalize_rule_selector(selector);
+
+    ALL_RULE_NAMES
+        .iter()
+        .copied()
+        .chain(RULE_GROUPS.iter().map(|(name, _)| *name))
+        .map(|candidate| (edit_distance(&normalized, candidate), candidate))
+        .filter(|(distance, _)| *distance <= 2)
+        .min_by_key(|(distance, candidate)| (*distance, candidate.len()))
+        .map(|(_, candidate)| candidate)
+}
+
+/// The number of single-character insertions, deletions and substitutions between `a` and
+/// `b`.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0; b.len() + 1];
+
+    for (row, a_character) in a.chars().enumerate() {
+        current[0] = row + 1;
+
+        for (column, b_character) in b.iter().enumerate() {
+            let substitution = previous[column] + usize::from(a_character != *b_character);
+            current[column + 1] = substitution
+                .min(previous[column + 1] + 1)
+                .min(current[column] + 1);
+        }
+
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    previous[b.len()]
+}
+
+/// A `-r` value that names neither a rule nor a group.
+#[derive(Debug)]
+pub struct UnknownRule {
+    selector: String,
+    suggestion: Option<&'static str>,
+}
+
+impl std::fmt::Display for UnknownRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown rule `{}`", self.selector)?;
+
+        if let Some(suggestion) = self.suggestion {
+            write!(f, "\n  hint: did you mean `{suggestion}`?")?;
+        }
+
+        write!(
+            f,
+            "\n  note: `-r` takes comma-separated rule names, e.g. `-r cargo,nodejs`; \
+             `ocy --rules` lists them all, and `-r caches` selects the shared caches"
+        )
+    }
+}
+
+impl std::error::Error for UnknownRule {}
+
+/// The rules a scan actually uses.
+///
+/// With no selector the default set is every rule except the gated ones, and the flags add
+/// their group to it. A selector replaces the default set entirely -- `-r` has always
+/// meant "only these" -- and naming a gated rule is itself the opt-in, so
+/// `-r cargo-registry` works without `--caches`. A selection is the narrowest thing a user
+/// can express, and demanding a second flag to permit it would only be a way to forget
+/// one.
+pub fn select_rules(
+    all: Vec<Rule>,
+    selectors: &[String],
+    include_caches: bool,
+    include_commands: bool,
+) -> Result<Vec<Rule>, UnknownRule> {
+    if selectors.is_empty() {
+        return Ok(all
+            .into_iter()
+            .filter(|rule| {
+                (include_commands || !is_command_rule(&rule.name))
+                    && (include_caches || !is_cache_rule(&rule.name))
+            })
+            .collect());
+    }
+
+    let mut selected = HashSet::new();
+    for selector in selectors {
+        selected.extend(expand_rule_selector(selector).ok_or_else(|| UnknownRule {
+            selector: selector.clone(),
+            suggestion: suggest_rule_selector(selector),
+        })?);
+    }
+
+    Ok(all
+        .into_iter()
+        .filter(|rule| selected.contains(&*rule.name))
+        .collect())
 }
 
 /// Hidden application state under the user's home, kept out of every rule regardless of

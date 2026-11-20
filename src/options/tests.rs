@@ -155,3 +155,44 @@ fn further_repeats_stay_at_trace() {
 fn quiet_overrides_verbose() {
     assert_eq!(Some(log::LevelFilter::Off), verbosity(3, true));
 }
+
+fn with_rules(values: &[&str]) -> OcyOptions {
+    OcyOptions {
+        rules: values.iter().map(|value| (*value).to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+/// One `-r` may name several rules, so chaining does not need a quote around the value.
+#[test]
+fn a_rule_value_may_be_comma_separated() {
+    assert_eq!(
+        vec!["cargo", "gradle"],
+        with_rules(&["cargo,gradle"]).selected_rules()
+    );
+}
+
+/// Both forms compose, so neither has to be used exclusively.
+#[test]
+fn rule_values_compose() {
+    assert_eq!(
+        vec!["cargo", "gradle", "nodejs"],
+        with_rules(&["cargo,gradle", "nodejs"]).selected_rules()
+    );
+}
+
+/// Rule names never contain a comma, so unlike `--ignore` a split is always right. The
+/// spaced spelling is accepted too: quoting `"tool caches"` must resolve.
+#[test]
+fn rule_values_are_trimmed_and_empty_entries_dropped() {
+    assert_eq!(
+        vec!["cargo", "tool caches"],
+        with_rules(&[" cargo , tool caches ,"]).selected_rules()
+    );
+}
+
+#[test]
+fn no_rule_flag_selects_nothing() {
+    assert!(with_rules(&[]).selected_rules().is_empty());
+    assert!(with_rules(&[",,"]).selected_rules().is_empty());
+}

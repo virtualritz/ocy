@@ -55,56 +55,59 @@ wanted to have a quick tool for wiping them securely.
 more *markers* that identify the project, and the *targets* it may reclaim. All
 markers must be present, so a rule only fires on real evidence of a project.
 
-| Rule name    | Markers                   | Reclaims                                                                  |
-|--------------|---------------------------|---------------------------------------------------------------------------|
-| Cargo        | Cargo.toml                | target                                                                    |
-| Cargo        | CACHEDIR.TAG **and** .rustc_info.json *(inside)* | the target directory itself, whatever `CARGO_TARGET_DIR` called it |
-| Gradle       | build.gradle*             | build, .gradle                                                            |
-| Maven        | pom.xml                   | target                                                                    |
-| SBT          | build.sbt                 | target, project/target                                                    |
-| NodeJS       | package.json              | node_modules, .next, .nuxt, .turbo, .svelte-kit, .parcel-cache, .npm-cache |
-| Angular      | angular.json              | .angular/cache                                                            |
-| Python venv  | pyvenv.cfg *(inside)*     | the virtual environment itself                                            |
-| Python       | *.py                      | \_\_pycache\_\_                                                           |
-| Python       | pyproject.toml, setup.py  | .pytest_cache, .mypy_cache, .ruff_cache, .tox, .nox, .hypothesis, build, dist |
-| .NET         | *.csproj, *.fsproj        | bin, obj                                                                  |
-| CMake        | CMakeLists.txt            | cmake-build-*, CMakeFiles                                                 |
-| CMake        | CMakeCache.txt *(inside)* | the build directory itself, whatever it was called                        |
-| Zig          | build.zig                 | .zig-cache, zig-cache, zig-out                                            |
-| SwiftPM      | Package.swift             | .build                                                                    |
-| XCode        | *.xcodeproj               | DerivedData                                                               |
-| Elixir       | mix.exs                   | \_build, deps                                                             |
-| Cabal        | *.cabal                   | dist-newstyle                                                             |
-| Stack        | stack.yaml                | .stack-work                                                               |
-| Flutter/Dart | pubspec.yaml              | build, .dart_tool                                                         |
-| Unity        | Assets **and** ProjectSettings | Library, Temp, Obj, Logs                                             |
-| Trunk        | Trunk.toml                | dist                                                                      |
-| Terraform    | *.tf                      | .terraform                                                                |
-| Composer     | composer.json             | vendor                                                                    |
-| Git worktree | .git                      | records of worktrees whose checkout is gone                               |
-| Make         | Makefile                  | runs `make clean` — **opt-in**, see below                                 |
+The `Rule` column is the name `-r` takes.
 
-And, behind `--caches`, the caches a tool keeps once for the whole machine
-rather than per project:
+| Rule          | Markers                   | Reclaims                                                                  |
+|---------------|---------------------------|---------------------------------------------------------------------------|
+| `cargo`       | Cargo.toml                | target                                                                    |
+| `cargo`       | CACHEDIR.TAG **and** .rustc_info.json *(inside)* | the target directory itself, whatever `CARGO_TARGET_DIR` called it |
+| `gradle`      | build.gradle*             | build, .gradle                                                            |
+| `maven`       | pom.xml                   | target                                                                    |
+| `sbt`         | build.sbt                 | target, project/target                                                    |
+| `nodejs`      | package.json              | node_modules, .next, .nuxt, .turbo, .svelte-kit, .parcel-cache, .npm-cache |
+| `angular`     | angular.json              | .angular/cache                                                            |
+| `python-venv` | pyvenv.cfg *(inside)*     | the virtual environment itself                                            |
+| `python`      | *.py                      | \_\_pycache\_\_                                                           |
+| `python`      | pyproject.toml, setup.py  | .pytest_cache, .mypy_cache, .ruff_cache, .tox, .nox, .hypothesis, build, dist |
+| `dotnet`      | *.csproj, *.fsproj        | bin, obj                                                                  |
+| `cmake`       | CMakeLists.txt            | cmake-build-*, CMakeFiles                                                 |
+| `cmake`       | CMakeCache.txt *(inside)* | the build directory itself, whatever it was called                        |
+| `zig`         | build.zig                 | .zig-cache, zig-cache, zig-out                                            |
+| `swiftpm`     | Package.swift             | .build                                                                    |
+| `xcode`       | *.xcodeproj               | DerivedData                                                               |
+| `elixir`      | mix.exs                   | \_build, deps                                                             |
+| `cabal`       | *.cabal                   | dist-newstyle                                                             |
+| `stack`       | stack.yaml                | .stack-work                                                               |
+| `flutter`     | pubspec.yaml              | build, .dart_tool                                                         |
+| `unity`       | Assets **and** ProjectSettings | Library, Temp, Obj, Logs                                             |
+| `trunk`       | Trunk.toml                | dist                                                                      |
+| `terraform`   | *.tf                      | .terraform                                                                |
+| `composer`    | composer.json             | vendor                                                                    |
+| `git-worktree`| .git                      | records of worktrees whose checkout is gone                               |
+| `make`        | Makefile                  | runs `make clean` — **opt-in**, see below                                 |
 
-| Rule name      | Directory                          | Reclaims                       |
-|----------------|------------------------------------|--------------------------------|
-| Cargo registry | `$CARGO_HOME`, or `~/.cargo`, `/registry` | cache, src              |
-| Cargo git      | `$CARGO_HOME`, or `~/.cargo`, `/git`      | checkouts, db           |
-| Gradle cache   | `$GRADLE_USER_HOME`, or `~/.gradle`       | caches, daemon          |
-| Tool cache     | `$XDG_CACHE_HOME`, or `~/.cache` (and `~/Library/Caches` on macOS) | sccache, Mozilla.sccache, ccache, miri, trunk, .wasm-pack, node-gyp, pnpm, yarn, puppeteer, deno, pip, uv, go-build |
-| Tool cache     | `~`                                       | .ccache, .npm/_cacache, .local/share/pnpm/store, .bun/install/cache, .m2/repository, .ivy2/cache |
-| APT cache      | `/var/cache/apt`                          | archives/\*.deb, archives/partial/\*, pkgcache.bin, srcpkgcache.bin |
+And the caches a tool keeps once for the whole machine rather than per project.
+These are not part of a default scan: reach them with `--caches`, or name one
+with `-r` (see [Selecting rules](#selecting-rules)).
+
+| Rule             | Directory                          | Reclaims                       |
+|------------------|------------------------------------|--------------------------------|
+| `cargo-registry` | `$CARGO_HOME`, or `~/.cargo`, `/registry` | cache, src              |
+| `cargo-git`      | `$CARGO_HOME`, or `~/.cargo`, `/git`      | checkouts, db           |
+| `gradle-cache`   | `$GRADLE_USER_HOME`, or `~/.gradle`       | caches, daemon          |
+| `tool-caches`    | `$XDG_CACHE_HOME`, or `~/.cache` (and `~/Library/Caches` on macOS) | sccache, Mozilla.sccache, ccache, miri, trunk, .wasm-pack, node-gyp, pnpm, yarn, puppeteer, deno, pip, uv, go-build |
+| `tool-caches`    | `~`                                       | .ccache, .npm/_cacache, .local/share/pnpm/store, .bun/install/cache, .m2/repository, .ivy2/cache |
+| `apt-cache`      | `/var/cache/apt`                          | archives/\*.deb, archives/partial/\*, pkgcache.bin, srcpkgcache.bin |
 
 The APT cache rule removes what `apt-get clean` removes, and keeps what it keeps:
 the `archives/lock` file and the `archives/partial` directory itself. The
 package lists in `/var/lib/apt/lists` are left alone, since without them apt
 knows no packages until the next `apt update`. The cache belongs to root, so
-only a scan run as root can remove anything from it (`-r apt` selects just this
-rule):
+only a scan run as root can remove anything from it (`-r apt-cache` selects just
+this rule):
 
 ```sh
-sudo ocy --caches -r apt /var/cache/apt
+sudo ocy -r apt-cache /var/cache/apt
 ```
 
 Each entry names the cache itself, not the directory holding it: `~/.npm` also
@@ -117,6 +120,56 @@ anywhere but macOS — simply never matches.
 Go's *module* cache is deliberately absent: Go makes those directories
 read-only, so removing one fails rather than reclaiming anything. That is what
 `go clean -modcache` is for.
+
+### Selecting rules
+
+Every rule has a one-word name, which `ocy --rules` prints. `-r` takes one or
+more of them, comma-separated or repeated, and the two forms compose:
+
+```sh
+ocy -r cargo,nodejs
+ocy -r cargo -r nodejs
+```
+
+No quoting is needed: a name never contains a space, and a comma inside a `-r`
+value always separates names. Matching ignores case, and the older spaced names
+still resolve when quoted — `-r "tool caches"` is the same as
+`-r tool-caches`.
+
+`-r` means *only these*, and naming a rule is the consent to run it. A default
+scan leaves out two groups because they can reach beyond the directory being
+scanned; every member is an ordinary rule otherwise:
+
+| Group         | Rules                                                              | Flag                | `-r`        |
+|---------------|--------------------------------------------------------------------|---------------------|-------------|
+| shared caches | `cargo-registry`, `cargo-git`, `gradle-cache`, `tool-caches`, `apt-cache` | `--caches`          | `-r caches` |
+| commands      | `make`                                                             | `--allow-commands`  | `-r commands` |
+
+The flags *add* a group to the default set; `-r` *replaces* the selection:
+
+| Invocation                | Rules used                                              |
+|---------------------------|---------------------------------------------------------|
+| `ocy`                     | every project rule                                      |
+| `ocy --caches`            | project rules + shared caches                           |
+| `ocy -r caches`           | shared caches only                                      |
+| `ocy -r apt-cache`        | just the apt cache — no `--caches` needed               |
+| `ocy --caches -r cargo`   | just `cargo`; the flag is redundant, not an error       |
+| `ocy -r make`             | just the Make rule, which runs `make clean`             |
+
+A selected cache rule opens the hidden directories it lives in, so `-r caches`
+does not need `--all` beside it. Likewise `-r make` carries the same consent as
+`--allow-commands`: an explicit `-r` is a narrower request than the flag, and
+demanding both would only be a way to forget one.
+
+An unknown name is refused before anything is scanned, with the closest rule
+offered as a hint:
+
+```
+$ ocy -r toolcache
+error: unknown rule `toolcache`
+  hint: did you mean `tool-caches`?
+  note: `-r` takes comma-separated rule names, e.g. `-r cargo,nodejs`; `ocy --rules` lists them all, and `-r caches` selects the shared caches
+```
 
 ### Caches the environment has moved
 
@@ -156,21 +209,13 @@ Four rule shapes go beyond a plain sibling match:
   the ones `git worktree prune` would remove are offered. Locked records are
   left alone.
 
-### Command rules are opt-in
-
-A rule such as `make clean` runs a script the scanned directory controls.
-Enabling that for an ordinary scan would execute arbitrary code from any tree
-that happens to contain a `Makefile`, so it requires `--allow-commands`.
-
-### Shared caches are opt-in
+### What counts as a cache
 
 A cache under `~/.cargo` or `~/.cache` is not project output. It belongs to
-every project on the machine at once, so reclaiming it during a scan of one
-directory would reach far outside what was asked for. `--caches` asks for it
-explicitly, and opens the hidden directories those caches live in, so it does
-not also need `--all`.
+every project on the machine at once, so a scan only claims one when asked —
+`--caches` adds the group, `-r` names it.
 
-Only true caches are listed: everything under `--caches` is refetched or
+Only true caches are listed: everything the cache rules claim is refetched or
 rebuilt on demand, so losing it costs time and nothing else. Installed software
 that merely happens to be large is left alone — `~/.rustup/toolchains`,
 `~/.gradle/wrapper` and globally installed npm packages are managed with
@@ -178,8 +223,8 @@ that merely happens to be large is left alone — `~/.rustup/toolchains`,
 bookkeeping straight where deleting the directory would not.
 
 An anchored rule is still only reached by walking. A cache outside the tree you
-pointed `ocy` at stays untouched, so `ocy --caches ~/code` reclaims nothing from
-`~/.cargo` — and knowing that `SCCACHE_DIR` points at `/mnt/fast/sccache` does
+pointed `ocy` at stays untouched, so `ocy --caches ~/code` or `ocy -r caches ~/code`
+reclaims nothing from `~/.cargo` — and knowing that `SCCACHE_DIR` points at `/mnt/fast/sccache` does
 not help a scan of `~` either. Point `ocy` at a directory above the cache, or at
 the cache itself.
 
@@ -187,9 +232,9 @@ the cache itself.
 
 The rule-name column is tinted per ecosystem, so a long scan can be read by
 colour rather than by re-reading every row. Rules sharing a name -- the three
-Python ones, both .NET ones -- share a tint and so group visually. Tints are
-mid-tone, to stay legible on a light or a dark terminal, and anything without a
-curated tint gets a stable one derived from its name.
+`python` ones, both `cargo` and both `dotnet` ones -- share a tint and so group
+visually. Tints are mid-tone, to stay legible on a light or a dark terminal, and
+anything without a curated tint gets a stable one derived from its name.
 
 Colour is dropped automatically when output is not a terminal, and `NO_COLOR` is
 honoured. The tints are 24-bit; a terminal without truecolor ignores them and
@@ -217,7 +262,9 @@ Build output routinely hides behind a leading dot, so a hidden directory that is
 itself a target — `.next`, `.gradle`, `.terraform` — is always reclaimed, and a
 nested target such as `.angular/cache` is resolved directly. The walk descends
 into `.venv`, which is self-marked and has to be looked inside, and into linked
-worktrees found as above. Use `--all` to descend into every hidden directory.
+worktrees found as above. Selecting a cache rule — `--caches`, `-r caches` or a
+single cache name — also descends into the hidden directories holding it, so
+none of them needs `--all`. Use `--all` to descend into every hidden directory.
 Version control metadata (`.git`, `.svn`, `.hg`, `.jj`, `.bzr`) is never
 descended into, and neither is `node_modules`.
 
@@ -250,7 +297,8 @@ Positional arguments:
 
 Optional arguments:
   -h, --help             print help message
-  -r, --rule RULES       apply only these rules (repeatable)
+  -r, --rule RULE[,RULE...]
+                         apply only these rules; comma-separated or repeatable (`ocy --rules` lists names)
   -l, --rules            list all available rules
   -i, --ignore PATH[,PATH...]
                          ignore path(s) and everything under them, repeatable
@@ -259,8 +307,8 @@ Optional arguments:
   -q, --quiet            suppress all logging
   -a, --all              walk into hidden dirs
   -n, --dry-run          report what would be reclaimed, then exit without deleting
-  -A, --allow-commands   allow rules that run a project's own clean command (e.g. `make clean`)
-      --caches           also reclaim shared tool caches (cargo registry and git, sccache, ...)
+  -A, --allow-commands   allow rules that run a project's own clean command (same as adding `-r commands`)
+      --caches           also reclaim shared tool caches (same as adding `-r caches`)
   -m, --max-depth N      do not descend deeper than this many levels
   -x, --one-file-system  do not cross onto another filesystem
 ```

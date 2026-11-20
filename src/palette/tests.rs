@@ -4,21 +4,21 @@ use std::collections::HashSet;
 
 #[test]
 fn a_name_always_gets_the_same_colour() {
-    assert_eq!(rule_color("Cargo"), rule_color("Cargo"));
+    assert_eq!(rule_color("cargo"), rule_color("cargo"));
     assert_eq!(rule_color("Nonesuch"), rule_color("Nonesuch"));
 }
 
 /// The three Python rules share a name, so they have to read as one ecosystem.
 #[test]
 fn rules_sharing_a_name_share_a_colour() {
-    assert_eq!(rule_color("Python"), rule_color("Python"));
-    assert_ne!(rule_color("Python"), rule_color("Python venv"));
+    assert_eq!(rule_color("python"), rule_color("python"));
+    assert_ne!(rule_color("python"), rule_color("python-venv"));
 }
 
 #[test]
 fn different_ecosystems_get_different_colours() {
-    assert_ne!(rule_color("Cargo"), rule_color("NodeJS"));
-    assert_ne!(rule_color("Maven"), rule_color("Gradle"));
+    assert_ne!(rule_color("cargo"), rule_color("nodejs"));
+    assert_ne!(rule_color("maven"), rule_color("gradle"));
 }
 
 /// Every built-in rule should be curated rather than falling back to an arbitrary tint.
@@ -26,7 +26,7 @@ fn different_ecosystems_get_different_colours() {
 fn every_built_in_rule_has_a_curated_tint() -> eyre::Result<()> {
     let curated: HashSet<&str> = RULE_TINTS.iter().map(|(name, _)| *name).collect();
 
-    let uncurated: Vec<String> = standard_rules(true, true)?
+    let uncurated: Vec<String> = standard_rules()?
         .iter()
         .map(|rule| rule.name.to_string())
         .filter(|name| !curated.contains(name.as_str()))

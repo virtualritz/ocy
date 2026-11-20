@@ -1,4 +1,4 @@
-use super::{SCANNED_HIDDEN_DIRS, scanned_hidden, standard_rules};
+use super::{ALL_RULE_NAMES, SCANNED_HIDDEN_DIRS, scanned_hidden, select_rules, standard_rules};
 use ocy_core::filesystem::{FileSystem, RealFileSystem};
 use ocy_core::models::{FileInfo, RemovalAction, RemovalCandidate};
 use ocy_core::rule::Rule;
@@ -85,16 +85,65 @@ fn reclaimed_at(root: &Path, rules: Vec<Rule>) -> eyre::Result<Vec<String>> {
     Ok(found)
 }
 
+/// The default rules, as a scan with no `-r` and no group flag gets them.
+fn default_rules() -> eyre::Result<Vec<Rule>> {
+    Ok(select_rules(standard_rules()?, &[], false, false)?)
+}
+
+/// The rules selected by `-r` values, with both group flags left off.
+fn selected_rules(selectors: &[&str]) -> eyre::Result<Vec<Rule>> {
+    let selectors: Vec<String> = selectors
+        .iter()
+        .map(|selector| (*selector).into())
+        .collect();
+
+    Ok(select_rules(standard_rules()?, &selectors, false, false)?)
+}
+
+fn names(rules: &[Rule]) -> Vec<String> {
+    rules.iter().map(|rule| rule.name.to_string()).collect()
+}
+
 #[test]
 fn the_built_in_rule_set_is_valid() -> eyre::Result<()> {
-    assert!(!standard_rules(false, false)?.is_empty());
+    assert!(!standard_rules()?.is_empty());
+    Ok(())
+}
+
+/// A name is what `-r` takes, and a value is chained with commas, so no name may contain a
+/// character that would need quoting or split the value.
+#[test]
+fn every_rule_name_is_a_single_token() -> eyre::Result<()> {
+    for name in names(&standard_rules()?) {
+        assert!(
+            name.chars().all(|character| character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || character == '-'),
+            "{name:?} is not a single lowercase token"
+        );
+    }
+    Ok(())
+}
+
+/// The catalog and the selector-validated name list drift apart easily, and a name missing
+/// from the list would be unreachable from `-r`.
+#[test]
+fn the_rule_catalog_matches_the_listed_names() -> eyre::Result<()> {
+    let catalog: std::collections::HashSet<String> =
+        names(&standard_rules()?).into_iter().collect();
+    let listed: std::collections::HashSet<String> = ALL_RULE_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+
+    assert_eq!(listed, catalog);
     Ok(())
 }
 
 #[test]
 fn command_rules_are_opt_in() -> eyre::Result<()> {
-    let without = standard_rules(false, false)?.len();
-    let with = standard_rules(true, false)?.len();
+    let without = default_rules()?.len();
+    let with = select_rules(standard_rules()?, &[], false, true)?.len();
 
     assert_eq!(
         without + 1,
@@ -106,12 +155,9 @@ fn command_rules_are_opt_in() -> eyre::Result<()> {
 
 #[test]
 fn no_command_rule_is_present_by_default() -> eyre::Result<()> {
-    let names: Vec<String> = standard_rules(false, false)?
-        .iter()
-        .map(|rule| rule.name.to_string())
-        .collect();
+    let names = names(&default_rules()?);
 
-    assert!(!names.contains(&"Make".to_string()), "got {names:?}");
+    assert!(!names.contains(&"make".to_string()), "got {names:?}");
     Ok(())
 }
 
@@ -119,18 +165,49 @@ fn no_command_rule_is_present_by_default() -> eyre::Result<()> {
 /// must not reclaim it without being asked.
 #[test]
 fn cache_rules_are_opt_in() -> eyre::Result<()> {
-    let default: Vec<String> = standard_rules(false, false)?
-        .iter()
-        .map(|rule| rule.name.to_string())
-        .collect();
+    let default = names(&default_rules()?);
 
     assert!(
-        standard_rules(false, true)?.len() > default.len(),
+        select_rules(standard_rules()?, &[], true, false)?.len() > default.len(),
         "--caches should add rules"
     );
     assert!(
-        !default.contains(&"Tool cache".to_string()),
+        !default.contains(&"tool-caches".to_string()),
         "got {default:?}"
+    );
+    Ok(())
+}
+
+/// Naming a cache rule is the opt-in, so `-r apt-cache` works without `--caches`.
+#[test]
+fn naming_a_cache_rule_selects_it_without_the_flag() -> eyre::Result<()> {
+    let mut selected = names(&selected_rules(&["cargo-registry"])?);
+    selected.dedup();
+
+    assert_eq!(vec!["cargo-registry"], selected);
+    Ok(())
+}
+
+/// The group is the whole point of the flag: `-r caches` and `--caches` reach the same
+/// rules, one by selecting only them and the other by adding them to the default set.
+#[test]
+fn the_caches_group_selects_every_cache_rule() -> eyre::Result<()> {
+    let mut group = names(&selected_rules(&["caches"])?);
+    group.sort_unstable();
+    group.dedup();
+
+    let mut expected: Vec<String> = super::CACHE_RULE_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    expected.sort_unstable();
+
+    assert_eq!(expected, group);
+    assert!(
+        select_rules(standard_rules()?, &[], true, false)?
+            .iter()
+            .all(|rule| !super::is_cache_rule(&rule.name)
+                || expected.contains(&rule.name.to_string()))
     );
     Ok(())
 }
@@ -139,11 +216,8 @@ fn cache_rules_are_opt_in() -> eyre::Result<()> {
 /// would be free to fire against any project directory that happened to look similar.
 #[test]
 fn every_cache_rule_is_anchored_to_a_path() -> eyre::Result<()> {
-    let default = standard_rules(false, false)?.len();
-
-    let unanchored: Vec<String> = standard_rules(false, true)?
+    let unanchored: Vec<String> = selected_rules(&["caches"])?
         .into_iter()
-        .skip(default)
         .filter(|rule| rule.anchor().is_none())
         .map(|rule| rule.name.to_string())
         .collect();
@@ -156,7 +230,7 @@ fn every_cache_rule_is_anchored_to_a_path() -> eyre::Result<()> {
 /// stop it matching anywhere else.
 #[test]
 fn no_default_rule_is_anchored() -> eyre::Result<()> {
-    let anchored: Vec<String> = standard_rules(true, false)?
+    let anchored: Vec<String> = default_rules()?
         .into_iter()
         .filter(|rule| rule.anchor().is_some())
         .map(|rule| rule.name.to_string())
@@ -179,7 +253,7 @@ fn a_renamed_cargo_target_directory_is_still_found() -> eyre::Result<()> {
             // A cache tagged the same way, but not by cargo.
             "elsewhere/CACHEDIR.TAG",
         ],
-        standard_rules(false, false)?,
+        default_rules()?,
     )?;
 
     assert_eq!(vec!["app/target-alt"], found);
@@ -198,7 +272,7 @@ fn a_cmake_build_directory_is_found_whatever_it_is_called() -> eyre::Result<()> 
             "proj/Linux-x86_64-optimize/CMakeCache.txt",
             "proj/src/main.cpp",
         ],
-        standard_rules(false, false)?,
+        default_rules()?,
     )?;
 
     assert_eq!(
@@ -220,7 +294,7 @@ fn a_dist_directory_is_only_claimed_for_a_trunk_project() -> eyre::Result<()> {
             "packaged/Cargo.toml",
             "packaged/dist/release.tar.gz",
         ],
-        standard_rules(false, false)?,
+        default_rules()?,
     )?;
 
     assert_eq!(vec!["wasm-app/dist"], found);
@@ -249,7 +323,7 @@ fn every_scanned_hidden_directory_is_actually_hidden() {
 /// Without this, `--caches` would silently need `--all` beside it to find anything.
 #[test]
 fn enabling_caches_opens_the_hidden_directories_they_live_in() -> eyre::Result<()> {
-    let rules = standard_rules(false, true)?;
+    let rules = select_rules(standard_rules()?, &[], true, false)?;
     let opened = scanned_hidden(&rules);
 
     for anchor in rules.iter().filter_map(Rule::anchor) {
@@ -263,7 +337,7 @@ fn enabling_caches_opens_the_hidden_directories_they_live_in() -> eyre::Result<(
 /// The default scan must not gain reach it did not have before.
 #[test]
 fn the_default_rule_set_opens_no_extra_hidden_directories() -> eyre::Result<()> {
-    let default = scanned_hidden(&standard_rules(true, false)?);
+    let default = scanned_hidden(&default_rules()?);
 
     assert_eq!(SCANNED_HIDDEN_DIRS.len(), default.len(), "got {default:?}");
     Ok(())
@@ -279,7 +353,7 @@ fn a_cache_rule_reclaims_only_the_cache_it_names() -> eyre::Result<()> {
 
     let found = reclaimed_at(
         root.path(),
-        vec![Rule::remove_at("Tool cache", cache, &["sccache"])?],
+        vec![Rule::remove_at("tool-caches", cache, &["sccache"])?],
     )?;
 
     assert_eq!(vec![".cache/sccache"], found);
@@ -321,13 +395,20 @@ fn the_apt_cache_rule_reclaims_what_apt_get_clean_does() -> eyre::Result<()> {
     Ok(())
 }
 
-/// The apt cache is shared by the whole machine, so it must stay behind `--caches`.
+/// The apt cache is shared by the whole machine, so it is absent from a default scan --
+/// but naming it is the opt-in, and both spellings have to reach it.
 #[test]
-fn the_apt_cache_rule_is_only_offered_with_caches() -> eyre::Result<()> {
-    let is_apt = |rule: &Rule| rule.anchor() == Some(Path::new(super::APT_CACHE));
+fn the_apt_cache_rule_needs_asking_for_by_name_or_group() -> eyre::Result<()> {
+    let is_apt = |rule: &Rule| rule.anchor() == Some(Path::new(super::APT_CACHE_DIR));
 
-    assert!(!standard_rules(false, false)?.iter().any(is_apt));
-    assert!(standard_rules(false, true)?.iter().any(is_apt));
+    assert!(!default_rules()?.iter().any(is_apt));
+    assert!(
+        select_rules(standard_rules()?, &[], true, false)?
+            .iter()
+            .any(is_apt)
+    );
+    assert!(selected_rules(&["apt-cache"])?.iter().any(is_apt));
+    assert!(selected_rules(&["apt"])?.iter().any(is_apt));
     Ok(())
 }
 
@@ -341,7 +422,7 @@ fn a_moved_cache_is_reclaimed_where_it_now_lives() -> eyre::Result<()> {
     fs::create_dir_all(root.path().join("scratch/keep"))?;
 
     let rule =
-        super::moved_cache_rule("Tool cache", &moved).expect("a nested path yields a rule")?;
+        super::moved_cache_rule("tool-caches", &moved).expect("a nested path yields a rule")?;
     let found = reclaimed_at(root.path(), vec![rule])?;
 
     assert_eq!(vec!["scratch/sccache"], found);
@@ -361,7 +442,7 @@ fn a_linked_cache_is_reclaimed_where_it_really_lives() -> eyre::Result<()> {
     fs::create_dir_all(&cache)?;
     std::os::unix::fs::symlink(&real, cache.join("sccache"))?;
 
-    let rules = super::anchored("Tool cache", cache, &["sccache"])?;
+    let rules = super::anchored("tool-caches", cache, &["sccache"])?;
     let found = reclaimed_at(&root_path, rules)?;
 
     assert_eq!(vec!["work/xdg/sccache"], found);
@@ -381,7 +462,7 @@ fn a_linked_cache_is_followed_out_of_the_scanned_tree() -> eyre::Result<()> {
     fs::create_dir_all(home.join(".cache"))?;
     std::os::unix::fs::symlink(&real, home.join(".cache/sccache"))?;
 
-    let rules = || Rule::remove_at("Tool cache", home.join(".cache"), &["sccache"]);
+    let rules = || Rule::remove_at("tool-caches", home.join(".cache"), &["sccache"]);
     let follow = |follow_links| -> eyre::Result<Vec<String>> {
         let options = WalkOptions {
             walk_all: true,
@@ -430,7 +511,7 @@ fn a_cache_behind_a_linked_parent_is_followed() -> eyre::Result<()> {
         follow_links: true,
         ..Default::default()
     };
-    let rule = Rule::remove_at("Tool cache", home.clone(), &[".npm/_cacache"])?;
+    let rule = Rule::remove_at("tool-caches", home.clone(), &[".npm/_cacache"])?;
     let start = RealFileSystem.directory_from_current(Some(&home))?;
     let notifier = SilentNotifier::default();
     Walker::new(RealFileSystem, vec![rule], &notifier, options).walk_from_path(&start);
@@ -469,7 +550,7 @@ fn a_cache_under_a_linked_anchor_is_followed() -> eyre::Result<()> {
         follow_links: true,
         ..Default::default()
     };
-    let rules = super::anchored("Cargo registry", home.join(".cargo/registry"), &["cache"])?;
+    let rules = super::anchored("cargo-registry", home.join(".cargo/registry"), &["cache"])?;
     let start = RealFileSystem.directory_from_current(Some(&home))?;
     let notifier = SilentNotifier::default();
     Walker::new(RealFileSystem, rules, &notifier, options).walk_from_path(&start);
@@ -493,7 +574,7 @@ fn a_cache_under_a_linked_anchor_is_followed() -> eyre::Result<()> {
 /// not be turned into one that would try.
 #[test]
 fn a_moved_cache_needs_a_parent_to_anchor_on() {
-    assert!(super::moved_cache_rule("Tool cache", Path::new("/")).is_none());
+    assert!(super::moved_cache_rule("tool-caches", Path::new("/")).is_none());
 }
 
 /// Every cache home in play has to be covered, or `--caches` finds nothing on a platform
@@ -501,7 +582,7 @@ fn a_moved_cache_needs_a_parent_to_anchor_on() {
 #[test]
 fn a_rule_is_anchored_at_every_cache_home() -> eyre::Result<()> {
     let home = super::home_directory().expect("tests run with a home directory");
-    let rules = standard_rules(false, true)?;
+    let rules = select_rules(standard_rules()?, &[], true, false)?;
 
     for cache_home in super::cache_homes(&home) {
         assert!(
@@ -560,7 +641,7 @@ fn an_xdg_state_dir_is_never_reclaimed_even_under_walk_all() -> eyre::Result<()>
     fs::create_dir_all(app.join("node_modules/dep"))?;
     fs::write(app.join("package.json"), b"{}")?;
 
-    let rules = || standard_rules(false, false);
+    let rules = default_rules;
 
     let unprotected = reclaimed_at(root.path(), rules()?)?;
     assert_eq!(
@@ -591,22 +672,21 @@ fn an_xdg_state_dir_is_never_reclaimed_even_under_walk_all() -> eyre::Result<()>
 
 /// `--rule` is typed by hand, so its casing should not matter.
 #[test]
-fn rule_name_matching_is_case_insensitive() {
-    assert!(super::rule_name_matches("Cargo", "cargo"));
-    assert!(super::rule_name_matches("Cargo", "CARGO"));
-    assert!(super::rule_name_matches("Cargo", "Cargo"));
+fn a_selector_is_case_insensitive() {
+    assert_eq!(Some(vec!["cargo"]), super::expand_rule_selector("cargo"));
+    assert_eq!(Some(vec!["cargo"]), super::expand_rule_selector("CARGO"));
+    assert_eq!(Some(vec!["cargo"]), super::expand_rule_selector("Cargo"));
 }
 
 /// The guarantee is for every rule, not only the one used as the example above. A rule
-/// added later is covered by construction: matching is done on the name, whatever it is.
+/// added later is covered by construction: expansion is done on the canonical name.
 #[test]
-fn every_rule_name_matches_in_any_case() -> eyre::Result<()> {
-    let rules = standard_rules(true, true)?;
-
-    for name in super::rule_names(&rules) {
+fn every_rule_name_expands_in_any_case() -> eyre::Result<()> {
+    for name in ALL_RULE_NAMES {
         for requested in [name.to_string(), name.to_uppercase(), name.to_lowercase()] {
-            assert!(
-                super::rule_name_matches(&name, &requested),
+            assert_eq!(
+                Some(vec![*name]),
+                super::expand_rule_selector(&requested),
                 "{requested:?} did not select rule {name:?}"
             );
         }
@@ -614,24 +694,73 @@ fn every_rule_name_matches_in_any_case() -> eyre::Result<()> {
     Ok(())
 }
 
-/// `Cargo` is the build tool; `Rust` is the language someone scanning their own machine
-/// is more likely to type.
+/// The names before the slug rename remain accepted when quoted, because normalization
+/// folds their spacing, dots, slashes and underscores into the canonical form.
 #[test]
-fn rust_is_a_synonym_for_the_cargo_rule() {
-    assert!(super::rule_name_matches("Cargo", "rust"));
-    assert!(super::rule_name_matches("Cargo", "Rust"));
+fn old_spaced_names_still_resolve() {
+    let expand = |selector: &str| super::expand_rule_selector(selector);
+
+    assert_eq!(Some(vec!["tool-caches"]), expand("Tool cache"));
+    assert_eq!(Some(vec!["tool-caches"]), expand("Tool caches"));
+    assert_eq!(Some(vec!["tool-caches"]), expand("tool_cache"));
+    assert_eq!(Some(vec!["python-venv"]), expand("Python venv"));
+    assert_eq!(Some(vec!["git-worktree"]), expand("Git worktree"));
+    assert_eq!(Some(vec!["dotnet"]), expand(".NET"));
+    assert_eq!(Some(vec!["flutter"]), expand("Flutter/Dart"));
+    assert_eq!(Some(vec!["nodejs"]), expand("Node.js"));
+    assert_eq!(Some(vec!["xcode"]), expand("XCode"));
 }
 
+/// `cargo` is the build tool; `rust` is the language someone scanning their own machine
+/// is more likely to type. `apt` is the command everyone knows the cache by.
 #[test]
-fn apt_is_a_synonym_for_the_apt_cache_rule() {
-    assert!(super::rule_name_matches("APT cache", "apt"));
-    assert!(super::rule_name_matches("APT cache", "apt cache"));
-    assert!(!super::rule_name_matches("Cargo", "apt"));
+fn short_aliases_resolve_to_the_canonical_rule() {
+    assert_eq!(Some(vec!["cargo"]), super::expand_rule_selector("rust"));
+    assert_eq!(Some(vec!["cargo"]), super::expand_rule_selector("Rust"));
+    assert_eq!(Some(vec!["apt-cache"]), super::expand_rule_selector("apt"));
+    assert_eq!(
+        Some(vec!["python-venv"]),
+        super::expand_rule_selector("venv")
+    );
 }
 
-/// A synonym must not turn into a match for every rule.
+/// An alias must not turn into a match for every rule.
 #[test]
-fn a_synonym_does_not_match_an_unrelated_rule() {
-    assert!(!super::rule_name_matches("Gradle", "rust"));
-    assert!(!super::rule_name_matches("NodeJS", "cargo"));
+fn an_alias_does_not_select_an_unrelated_rule() {
+    assert_eq!(None, super::expand_rule_selector("nonesuch"));
+    assert_ne!(Some(vec!["gradle"]), super::expand_rule_selector("rust"));
+}
+
+/// A mistyped selector is ordinary user error, so it has to name the closest rule and say
+/// how the flag is written rather than just refusing.
+#[test]
+fn an_unknown_selector_suggests_the_nearest_rule() {
+    let message = super::UnknownRule {
+        selector: "toolcache".into(),
+        suggestion: super::suggest_rule_selector("toolcache"),
+    }
+    .to_string();
+
+    assert!(
+        message.contains("unknown rule `toolcache`"),
+        "got {message}"
+    );
+    assert!(
+        message.contains("did you mean `tool-caches`"),
+        "got {message}"
+    );
+    assert!(message.contains("-r cargo,nodejs"), "got {message}");
+}
+
+/// A selector that is nothing like any rule still explains the syntax.
+#[test]
+fn an_unrecognizable_selector_still_explains_the_flag() {
+    let message = super::UnknownRule {
+        selector: "zzzzzzzzzz".into(),
+        suggestion: super::suggest_rule_selector("zzzzzzzzzz"),
+    }
+    .to_string();
+
+    assert!(!message.contains("did you mean"), "got {message}");
+    assert!(message.contains("`ocy --rules`"), "got {message}");
 }

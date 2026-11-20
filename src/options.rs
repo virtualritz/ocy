@@ -10,6 +10,12 @@ use log::LevelFilter;
 /// Separator accepted inside a single `--ignore` value.
 const IGNORE_SEPARATOR: char = ',';
 
+/// Separator accepted inside a single `--rule` value.
+///
+/// Unlike [`IGNORE_SEPARATOR`], this always splits: a rule name never contains a comma, so
+/// there is no path on disk that a split could contradict.
+const RULE_SEPARATOR: char = ',';
+
 #[derive(Debug, Default, Options)]
 pub struct OcyOptions {
     #[options(help = "print help message")]
@@ -18,10 +24,13 @@ pub struct OcyOptions {
     #[options(free, help = "start directory (defaults to current directory)")]
     pub start_dir: Vec<String>,
 
+    /// Held as written, because one value may name several rules. Values are split before
+    /// they are looked up as names, so the flag stays singular despite collecting a list.
     #[options(
         short = "r",
         long = "rule",
-        help = "apply only these rules (repeatable)"
+        meta = "RULE[,RULE...]",
+        help = "apply only these rules; comma-separated or repeatable (`ocy --rules` lists names)"
     )]
     pub rules: Vec<String>,
 
@@ -144,9 +153,19 @@ impl OcyOptions {
         }
     }
 
-    /// Returns the slice of selected rule names.
-    pub fn selected_rules(&self) -> &[String] {
-        &self.rules
+    /// The selected rule names, one per entry.
+    ///
+    /// Both `-r cargo -r gradle` and `-r cargo,gradle` are accepted, and they compose.
+    /// Names are empty-trimmed and empty entries dropped, so neither a trailing comma nor
+    /// spacing around one turns into a rule named `""`.
+    pub fn selected_rules(&self) -> Vec<String> {
+        self.rules
+            .iter()
+            .flat_map(|value| value.split(RULE_SEPARATOR))
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
     }
 }
 

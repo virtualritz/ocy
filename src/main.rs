@@ -14,9 +14,11 @@ use ocy_core::rule::Rule;
 use ocy_core::rule::widest_name;
 use ocy_core::walker::{WalkOptions, Walker};
 use ocy_core::{cleaner::Cleaner, models::RemovalCandidate};
-use rules::{protected_state_dirs, rule_name_matches, rule_names, scanned_hidden, standard_rules};
+use rules::{
+    is_cache_rule, is_command_rule, protected_state_dirs, rule_names, scanned_hidden, select_rules,
+    standard_rules,
+};
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use notifiers::{LoggingCleanerNotifier, VecWalkNotifier, progress_is_useful};
 use options::OcyOptions;
@@ -49,7 +51,14 @@ fn run(options: &OcyOptions) -> Result<ExitCode> {
         .directory_from_current(start_dir)
         .wrap_err("Cannot scan start directory")?;
 
-    let rules = rules_for_options(options)?;
+    // A mistyped rule is ordinary user error, not a bug worth a report location appended.
+    let rules = match rules_for_options(options) {
+        Ok(rules) => rules,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
 
     let mut ignores = options.ignores_set()?;
     ignores.extend(protected_state_dirs());
@@ -98,33 +107,12 @@ fn run(options: &OcyOptions) -> Result<ExitCode> {
 }
 
 fn rules_for_options(options: &OcyOptions) -> Result<Vec<Rule>> {
-    let all_rules = standard_rules(options.allow_commands, options.clean_caches)?;
-    let all_rule_names = rule_names(&all_rules);
-
-    let selected_rules = options.selected_rules();
-
-    for requested in selected_rules {
-        if !all_rule_names
-            .iter()
-            .any(|name| rule_name_matches(name, requested))
-        {
-            eyre::bail!("Unknown rule: {}", requested);
-        }
-    }
-
-    let filtered_rules = if selected_rules.is_empty() {
-        all_rules
-    } else {
-        all_rules
-            .into_iter()
-            .filter(|rule| {
-                selected_rules
-                    .iter()
-                    .any(|requested| rule_name_matches(&rule.name, requested))
-            })
-            .collect()
-    };
-    Ok(filtered_rules)
+    Ok(select_rules(
+        standard_rules()?,
+        &options.selected_rules(),
+        options.clean_caches,
+        options.allow_commands,
+    )?)
 }
 
 /// Say so when the requested root is one the scan would normally keep out of.
@@ -201,13 +189,35 @@ fn print_banner() {
 }
 
 fn print_rules() -> Result<()> {
-    let rules = rule_names(&standard_rules(true, true)?);
-    let mut rules: Vec<Arc<str>> = rules.into_iter().collect();
-    rules.sort();
+    let names = rule_names(&standard_rules()?);
+    let mut names: Vec<&str> = names.iter().map(|name| &**name).collect();
+    names.sort_unstable();
 
-    println!("Supported rules:");
-    for rule in rules {
-        println!(" - {}", rule);
-    }
+    print_rule_section("Rules", "the default scan", &names, |name| {
+        !is_cache_rule(name) && !is_command_rule(name)
+    });
+    print_rule_section(
+        "Cache rules",
+        "`--caches`, or `-r caches`",
+        &names,
+        is_cache_rule,
+    );
+    print_rule_section(
+        "Command rules",
+        "`--allow-commands`, or `-r commands`",
+        &names,
+        is_command_rule,
+    );
+
+    println!("`-r` takes one or more of these, comma-separated or repeated.");
+    println!("Naming a rule is enough to use it: `-r apt-cache` needs no `--caches`.");
     Ok(())
+}
+
+fn print_rule_section(title: &str, hint: &str, names: &[&str], filter: impl Fn(&str) -> bool) {
+    println!("{title} ({hint}):");
+    for name in names.iter().copied().filter(|name| filter(name)) {
+        println!("  {name}");
+    }
+    println!();
 }
